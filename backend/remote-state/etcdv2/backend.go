@@ -24,7 +24,7 @@ func New() backend.Backend {
 			"endpoints": &schema.Schema{
 				Type:        schema.TypeString,
 				Required:    true,
-				Description: "A space-separated list of the etcd endpoints<Paste>",
+				Description: "A space-separated list of the etcd endpoints",
 			},
 			"username": &schema.Schema{
 				Type:        schema.TypeString,
@@ -76,16 +76,16 @@ func (b *Backend) configure(ctx context.Context) error {
 }
 
 func (b *Backend) Workspaces() ([]string, error) {
-	return nil, backend.ErrNamedStatesNotSupported
+	return nil, backend.ErrWorkspacesNotSupported
 }
 
 func (b *Backend) DeleteWorkspace(string) error {
-	return backend.ErrNamedStatesNotSupported
+	return backend.ErrWorkspacesNotSupported
 }
 
 func (b *Backend) StateMgr(name string) (state.State, error) {
 	if name != backend.DefaultStateName {
-		return nil, backend.ErrNamedStatesNotSupported
+		return nil, backend.ErrWorkspacesNotSupported
 	}
 	return &remote.State{
 		Client: &EtcdClient{

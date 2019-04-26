@@ -3,7 +3,6 @@ package command
 import (
 	"bytes"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform/addrs"
 	"github.com/hashicorp/terraform/config/hcl2shim"
 	"github.com/hashicorp/terraform/repl"
+	"github.com/hashicorp/terraform/states"
 	"github.com/hashicorp/terraform/tfdiags"
 )
 
@@ -28,11 +28,11 @@ func (c *OutputCommand) Run(args []string) int {
 		return 1
 	}
 
-	var module string
+	var module, statePath string
 	var jsonOutput bool
-	cmdFlags := flag.NewFlagSet("output", flag.ContinueOnError)
+	cmdFlags := c.Meta.defaultFlagSet("output")
 	cmdFlags.BoolVar(&jsonOutput, "json", false, "json")
-	cmdFlags.StringVar(&c.Meta.statePath, "state", DefaultStateFilename, "path")
+	cmdFlags.StringVar(&statePath, "state", "", "path")
 	cmdFlags.StringVar(&module, "module", "", "module")
 	cmdFlags.Usage = func() { c.Ui.Error(c.Help()) }
 	if err := cmdFlags.Parse(args); err != nil {
@@ -51,6 +51,10 @@ func (c *OutputCommand) Run(args []string) int {
 	name := ""
 	if len(args) > 0 {
 		name = args[0]
+	}
+
+	if statePath != "" {
+		c.Meta.statePath = statePath
 	}
 
 	var diags tfdiags.Diagnostics
@@ -95,6 +99,10 @@ func (c *OutputCommand) Run(args []string) int {
 	}
 
 	state := stateStore.State()
+	if state == nil {
+		state = states.NewState()
+	}
+
 	mod := state.Module(moduleAddr)
 	if mod == nil {
 		c.Ui.Error(fmt.Sprintf(

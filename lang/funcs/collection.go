@@ -87,7 +87,7 @@ var LengthFunc = function.New(&function.Spec{
 	Type: func(args []cty.Value) (cty.Type, error) {
 		collTy := args[0].Type()
 		switch {
-		case collTy == cty.String || collTy.IsTupleType() || collTy.IsListType() || collTy.IsMapType() || collTy.IsSetType() || collTy == cty.DynamicPseudoType:
+		case collTy == cty.String || collTy.IsTupleType() || collTy.IsObjectType() || collTy.IsListType() || collTy.IsMapType() || collTy.IsSetType() || collTy == cty.DynamicPseudoType:
 			return cty.Number, nil
 		default:
 			return cty.Number, fmt.Errorf("argument must be a string, a collection type, or a structural type")
@@ -116,6 +116,50 @@ var LengthFunc = function.New(&function.Spec{
 			// Should never happen, because of the checks in our Type func above
 			return cty.UnknownVal(cty.Number), fmt.Errorf("impossible value type for length(...)")
 		}
+	},
+})
+
+// CoalesceFunc contructs a function that takes any number of arguments and
+// returns the first one that isn't empty. This function was copied from go-cty
+// stdlib and modified so that it returns the first *non-empty* non-null element
+// from a sequence, instead of merely the first non-null.
+var CoalesceFunc = function.New(&function.Spec{
+	Params: []function.Parameter{},
+	VarParam: &function.Parameter{
+		Name:             "vals",
+		Type:             cty.DynamicPseudoType,
+		AllowUnknown:     true,
+		AllowDynamicType: true,
+		AllowNull:        true,
+	},
+	Type: func(args []cty.Value) (ret cty.Type, err error) {
+		argTypes := make([]cty.Type, len(args))
+		for i, val := range args {
+			argTypes[i] = val.Type()
+		}
+		retType, _ := convert.UnifyUnsafe(argTypes)
+		if retType == cty.NilType {
+			return cty.NilType, fmt.Errorf("all arguments must have the same type")
+		}
+		return retType, nil
+	},
+	Impl: func(args []cty.Value, retType cty.Type) (ret cty.Value, err error) {
+		for _, argVal := range args {
+			// We already know this will succeed because of the checks in our Type func above
+			argVal, _ = convert.Convert(argVal, retType)
+			if !argVal.IsKnown() {
+				return cty.UnknownVal(retType), nil
+			}
+			if argVal.IsNull() {
+				continue
+			}
+			if retType == cty.String && argVal.RawEquals(cty.StringVal("")) {
+				continue
+			}
+
+			return argVal, nil
+		}
+		return cty.NilVal, fmt.Errorf("no non-null, non-empty-string arguments")
 	},
 })
 
@@ -419,27 +463,69 @@ func flattener(finalList []cty.Value, flattenList cty.Value) []cty.Value {
 var KeysFunc = function.New(&function.Spec{
 	Params: []function.Parameter{
 		{
-			Name: "inputMap",
-			Type: cty.DynamicPseudoType,
+			Name:         "inputMap",
+			Type:         cty.DynamicPseudoType,
+			AllowUnknown: true,
 		},
 	},
-	Type: function.StaticReturnType(cty.List(cty.String)),
-	Impl: func(args []cty.Value, retType cty.Type) (ret cty.Value, err error) {
-		var keys []cty.Value
+	Type: func(args []cty.Value) (cty.Type, error) {
 		ty := args[0].Type()
-
-		if !ty.IsObjectType() && !ty.IsMapType() {
-			return cty.NilVal, fmt.Errorf("keys() requires a map")
-		}
-
-		for it := args[0].ElementIterator(); it.Next(); {
-			k, _ := it.Element()
-			keys = append(keys, k)
-			if err != nil {
-				return cty.ListValEmpty(cty.String), err
+		switch {
+		case ty.IsMapType():
+			return cty.List(cty.String), nil
+		case ty.IsObjectType():
+			atys := ty.AttributeTypes()
+			if len(atys) == 0 {
+				return cty.EmptyTuple, nil
 			}
+			// All of our result elements will be strings, and atys just
+			// decides how many there are.
+			etys := make([]cty.Type, len(atys))
+			for i := range etys {
+				etys[i] = cty.String
+			}
+			return cty.Tuple(etys), nil
+		default:
+			return cty.DynamicPseudoType, function.NewArgErrorf(0, "must have map or object type")
 		}
-		return cty.ListVal(keys), nil
+	},
+	Impl: func(args []cty.Value, retType cty.Type) (cty.Value, error) {
+		m := args[0]
+		var keys []cty.Value
+
+		switch {
+		case m.Type().IsObjectType():
+			// In this case we allow unknown values so we must work only with
+			// the attribute _types_, not with the value itself.
+			var names []string
+			for name := range m.Type().AttributeTypes() {
+				names = append(names, name)
+			}
+			sort.Strings(names) // same ordering guaranteed by cty's ElementIterator
+			if len(names) == 0 {
+				return cty.EmptyTupleVal, nil
+			}
+			keys = make([]cty.Value, len(names))
+			for i, name := range names {
+				keys[i] = cty.StringVal(name)
+			}
+			return cty.TupleVal(keys), nil
+		default:
+			if !m.IsKnown() {
+				return cty.UnknownVal(retType), nil
+			}
+
+			// cty guarantees that ElementIterator will iterate in lexicographical
+			// order by key.
+			for it := args[0].ElementIterator(); it.Next(); {
+				k, _ := it.Element()
+				keys = append(keys, k)
+			}
+			if len(keys) == 0 {
+				return cty.ListValEmpty(cty.String), nil
+			}
+			return cty.ListVal(keys), nil
+		}
 	},
 })
 
@@ -765,6 +851,172 @@ var MergeFunc = function.New(&function.Spec{
 	},
 })
 
+// ReverseFunc takes a sequence and produces a new sequence of the same length
+// with all of the same elements as the given sequence but in reverse order.
+var ReverseFunc = function.New(&function.Spec{
+	Params: []function.Parameter{
+		{
+			Name: "list",
+			Type: cty.DynamicPseudoType,
+		},
+	},
+	Type: func(args []cty.Value) (cty.Type, error) {
+		argTy := args[0].Type()
+		switch {
+		case argTy.IsTupleType():
+			argTys := argTy.TupleElementTypes()
+			retTys := make([]cty.Type, len(argTys))
+			for i, ty := range argTys {
+				retTys[len(retTys)-i-1] = ty
+			}
+			return cty.Tuple(retTys), nil
+		case argTy.IsListType(), argTy.IsSetType(): // We accept sets here to mimic the usual behavior of auto-converting to list
+			return cty.List(argTy.ElementType()), nil
+		default:
+			return cty.NilType, function.NewArgErrorf(0, "can only reverse list or tuple values, not %s", argTy.FriendlyName())
+		}
+	},
+	Impl: func(args []cty.Value, retType cty.Type) (ret cty.Value, err error) {
+		in := args[0].AsValueSlice()
+		outVals := make([]cty.Value, len(in))
+		for i, v := range in {
+			outVals[len(outVals)-i-1] = v
+		}
+		switch {
+		case retType.IsTupleType():
+			return cty.TupleVal(outVals), nil
+		default:
+			if len(outVals) == 0 {
+				return cty.ListValEmpty(retType.ElementType()), nil
+			}
+			return cty.ListVal(outVals), nil
+		}
+	},
+})
+
+// SetProductFunc calculates the cartesian product of two or more sets or
+// sequences. If the arguments are all lists then the result is a list of tuples,
+// preserving the ordering of all of the input lists. Otherwise the result is a
+// set of tuples.
+var SetProductFunc = function.New(&function.Spec{
+	Params: []function.Parameter{},
+	VarParam: &function.Parameter{
+		Name: "sets",
+		Type: cty.DynamicPseudoType,
+	},
+	Type: func(args []cty.Value) (retType cty.Type, err error) {
+		if len(args) < 2 {
+			return cty.NilType, fmt.Errorf("at least two arguments are required")
+		}
+
+		listCount := 0
+		elemTys := make([]cty.Type, len(args))
+		for i, arg := range args {
+			aty := arg.Type()
+			switch {
+			case aty.IsSetType():
+				elemTys[i] = aty.ElementType()
+			case aty.IsListType():
+				elemTys[i] = aty.ElementType()
+				listCount++
+			case aty.IsTupleType():
+				// We can accept a tuple type only if there's some common type
+				// that all of its elements can be converted to.
+				allEtys := aty.TupleElementTypes()
+				if len(allEtys) == 0 {
+					elemTys[i] = cty.DynamicPseudoType
+					listCount++
+					break
+				}
+				ety, _ := convert.UnifyUnsafe(allEtys)
+				if ety == cty.NilType {
+					return cty.NilType, function.NewArgErrorf(i, "all elements must be of the same type")
+				}
+				elemTys[i] = ety
+				listCount++
+			default:
+				return cty.NilType, function.NewArgErrorf(i, "a set or a list is required")
+			}
+		}
+
+		if listCount == len(args) {
+			return cty.List(cty.Tuple(elemTys)), nil
+		}
+		return cty.Set(cty.Tuple(elemTys)), nil
+	},
+	Impl: func(args []cty.Value, retType cty.Type) (ret cty.Value, err error) {
+		ety := retType.ElementType()
+
+		total := 1
+		for _, arg := range args {
+			// Because of our type checking function, we are guaranteed that
+			// all of the arguments are known, non-null values of types that
+			// support LengthInt.
+			total *= arg.LengthInt()
+		}
+
+		if total == 0 {
+			// If any of the arguments was an empty collection then our result
+			// is also an empty collection, which we'll short-circuit here.
+			if retType.IsListType() {
+				return cty.ListValEmpty(ety), nil
+			}
+			return cty.SetValEmpty(ety), nil
+		}
+
+		subEtys := ety.TupleElementTypes()
+		product := make([][]cty.Value, total)
+
+		b := make([]cty.Value, total*len(args))
+		n := make([]int, len(args))
+		s := 0
+		argVals := make([][]cty.Value, len(args))
+		for i, arg := range args {
+			argVals[i] = arg.AsValueSlice()
+		}
+
+		for i := range product {
+			e := s + len(args)
+			pi := b[s:e]
+			product[i] = pi
+			s = e
+
+			for j, n := range n {
+				val := argVals[j][n]
+				ty := subEtys[j]
+				if !val.Type().Equals(ty) {
+					var err error
+					val, err = convert.Convert(val, ty)
+					if err != nil {
+						// Should never happen since we checked this in our
+						// type-checking function.
+						return cty.NilVal, fmt.Errorf("failed to convert argVals[%d][%d] to %s; this is a bug in Terraform", j, n, ty.FriendlyName())
+					}
+				}
+				pi[j] = val
+			}
+
+			for j := len(n) - 1; j >= 0; j-- {
+				n[j]++
+				if n[j] < len(argVals[j]) {
+					break
+				}
+				n[j] = 0
+			}
+		}
+
+		productVals := make([]cty.Value, total)
+		for i, vals := range product {
+			productVals[i] = cty.TupleVal(vals)
+		}
+
+		if retType.IsListType() {
+			return cty.ListVal(productVals), nil
+		}
+		return cty.SetVal(productVals), nil
+	},
+})
+
 // SliceFunc contructs a function that extracts some consecutive elements
 // from within a list.
 var SliceFunc = function.New(&function.Spec{
@@ -891,9 +1143,23 @@ var ValuesFunc = function.New(&function.Spec{
 		if ty.IsMapType() {
 			return cty.List(ty.ElementType()), nil
 		} else if ty.IsObjectType() {
-			var tys []cty.Type
-			for _, v := range ty.AttributeTypes() {
-				tys = append(tys, v)
+			// The result is a tuple type with all of the same types as our
+			// object type's attributes, sorted in lexicographical order by the
+			// keys. (This matches the sort order guaranteed by ElementIterator
+			// on a cty object value.)
+			atys := ty.AttributeTypes()
+			if len(atys) == 0 {
+				return cty.EmptyTuple, nil
+			}
+			attrNames := make([]string, 0, len(atys))
+			for name := range atys {
+				attrNames = append(attrNames, name)
+			}
+			sort.Strings(attrNames)
+
+			tys := make([]cty.Type, len(attrNames))
+			for i, name := range attrNames {
+				tys[i] = atys[name]
 			}
 			return cty.Tuple(tys), nil
 		}
@@ -902,33 +1168,12 @@ var ValuesFunc = function.New(&function.Spec{
 	Impl: func(args []cty.Value, retType cty.Type) (ret cty.Value, err error) {
 		mapVar := args[0]
 
-		if !mapVar.IsWhollyKnown() {
-			return cty.UnknownVal(retType), nil
-		}
-
-		if mapVar.LengthInt() == 0 {
-			return cty.ListValEmpty(retType.ElementType()), nil
-		}
-
-		keys, err := Keys(mapVar)
-		if err != nil {
-			return cty.NilVal, err
-		}
-
+		// We can just iterate the map/object value here because cty guarantees
+		// that these types always iterate in key lexicographical order.
 		var values []cty.Value
-
-		for it := keys.ElementIterator(); it.Next(); {
-			_, key := it.Element()
-			k := key.AsString()
-			if mapVar.Type().IsObjectType() {
-				if mapVar.Type().HasAttribute(k) {
-					value := mapVar.GetAttr(k)
-					values = append(values, value)
-				}
-			} else {
-				value := mapVar.Index(cty.StringVal(k))
-				values = append(values, value)
-			}
+		for it := mapVar.ElementIterator(); it.Next(); {
+			_, val := it.Element()
+			values = append(values, val)
 		}
 
 		if retType.IsTupleType() {
@@ -951,29 +1196,57 @@ var ZipmapFunc = function.New(&function.Spec{
 		},
 		{
 			Name: "values",
-			Type: cty.List(cty.DynamicPseudoType),
+			Type: cty.DynamicPseudoType,
 		},
 	},
 	Type: func(args []cty.Value) (ret cty.Type, err error) {
 		keys := args[0]
 		values := args[1]
+		valuesTy := values.Type()
 
-		if !keys.IsKnown() || !values.IsKnown() || keys.LengthInt() == 0 {
-			return cty.Map(cty.DynamicPseudoType), nil
-		}
+		switch {
+		case valuesTy.IsListType():
+			return cty.Map(values.Type().ElementType()), nil
+		case valuesTy.IsTupleType():
+			if !keys.IsWhollyKnown() {
+				// Since zipmap with a tuple produces an object, we need to know
+				// all of the key names before we can predict our result type.
+				return cty.DynamicPseudoType, nil
+			}
 
-		if keys.LengthInt() != values.LengthInt() {
-			return cty.NilType, fmt.Errorf("count of keys (%d) does not match count of values (%d)",
-				keys.LengthInt(), values.LengthInt())
+			keysRaw := keys.AsValueSlice()
+			valueTypesRaw := valuesTy.TupleElementTypes()
+			if len(keysRaw) != len(valueTypesRaw) {
+				return cty.NilType, fmt.Errorf("number of keys (%d) does not match number of values (%d)", len(keysRaw), len(valueTypesRaw))
+			}
+			atys := make(map[string]cty.Type, len(valueTypesRaw))
+			for i, keyVal := range keysRaw {
+				if keyVal.IsNull() {
+					return cty.NilType, fmt.Errorf("keys list has null value at index %d", i)
+				}
+				key := keyVal.AsString()
+				atys[key] = valueTypesRaw[i]
+			}
+			return cty.Object(atys), nil
+
+		default:
+			return cty.NilType, fmt.Errorf("values argument must be a list or tuple value")
 		}
-		return cty.Map(values.Type().ElementType()), nil
 	},
 	Impl: func(args []cty.Value, retType cty.Type) (ret cty.Value, err error) {
 		keys := args[0]
 		values := args[1]
 
-		if !keys.IsKnown() || !values.IsKnown() || keys.LengthInt() == 0 {
-			return cty.MapValEmpty(cty.DynamicPseudoType), nil
+		if !keys.IsWhollyKnown() {
+			// Unknown map keys and object attributes are not supported, so
+			// our entire result must be unknown in this case.
+			return cty.UnknownVal(retType), nil
+		}
+
+		// both keys and values are guaranteed to be shallowly-known here,
+		// because our declared params above don't allow unknown or null values.
+		if keys.LengthInt() != values.LengthInt() {
+			return cty.NilVal, fmt.Errorf("number of keys (%d) does not match number of values (%d)", keys.LengthInt(), values.LengthInt())
 		}
 
 		output := make(map[string]cty.Value)
@@ -986,7 +1259,19 @@ var ZipmapFunc = function.New(&function.Spec{
 			i++
 		}
 
-		return cty.MapVal(output), nil
+		switch {
+		case retType.IsMapType():
+			if len(output) == 0 {
+				return cty.MapValEmpty(retType.ElementType()), nil
+			}
+			return cty.MapVal(output), nil
+		case retType.IsObjectType():
+			return cty.ObjectVal(output), nil
+		default:
+			// Should never happen because the type-check function should've
+			// caught any other case.
+			return cty.NilVal, fmt.Errorf("internally selected incorrect result type %s (this is a bug)", retType.FriendlyName())
+		}
 	},
 })
 
@@ -1015,6 +1300,11 @@ func Element(list, index cty.Value) (cty.Value, error) {
 // Unicode characters in the given string.
 func Length(collection cty.Value) (cty.Value, error) {
 	return LengthFunc.Call([]cty.Value{collection})
+}
+
+// Coalesce takes any number of arguments and returns the first one that isn't empty.
+func Coalesce(args ...cty.Value) (cty.Value, error) {
+	return CoalesceFunc.Call(args)
 }
 
 // CoalesceList takes any number of list arguments and returns the first one that isn't empty.
@@ -1092,6 +1382,17 @@ func Matchkeys(values, keys, searchset cty.Value) (cty.Value, error) {
 // the argument sequence takes precedence.
 func Merge(maps ...cty.Value) (cty.Value, error) {
 	return MergeFunc.Call(maps)
+}
+
+// Reverse takes a sequence and produces a new sequence of the same length
+// with all of the same elements as the given sequence but in reverse order.
+func Reverse(list cty.Value) (cty.Value, error) {
+	return ReverseFunc.Call([]cty.Value{list})
+}
+
+// SetProduct computes the cartesian product of sets or sequences.
+func SetProduct(sets ...cty.Value) (cty.Value, error) {
+	return SetProductFunc.Call(sets)
 }
 
 // Slice extracts some consecutive elements from within a list.

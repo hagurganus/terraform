@@ -5,7 +5,6 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +15,7 @@ import (
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/hashicorp/terraform/addrs"
+	backendinit "github.com/hashicorp/terraform/backend/init"
 	"github.com/hashicorp/terraform/configs/configschema"
 	"github.com/hashicorp/terraform/helper/copy"
 	"github.com/hashicorp/terraform/plans"
@@ -56,7 +56,7 @@ func TestPlan_lockedState(t *testing.T) {
 	}
 
 	testPath := testFixturePath("plan")
-	unlock, err := testLockState("./testdata", filepath.Join(testPath, DefaultStateFilename))
+	unlock, err := testLockState(testDataDir, filepath.Join(testPath, DefaultStateFilename))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,6 +290,9 @@ func TestPlan_outBackend(t *testing.T) {
 						Type: "test_instance",
 						Primary: &terraform.InstanceState{
 							ID: "bar",
+							Attributes: map[string]string{
+								"ami": "bar",
+							},
 						},
 					},
 				},
@@ -305,6 +308,27 @@ func TestPlan_outBackend(t *testing.T) {
 
 	outPath := "foo"
 	p := testProvider()
+	p.GetSchemaReturn = &terraform.ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_instance": {
+				Attributes: map[string]*configschema.Attribute{
+					"id": {
+						Type:     cty.String,
+						Computed: true,
+					},
+					"ami": {
+						Type:     cty.String,
+						Optional: true,
+					},
+				},
+			},
+		},
+	}
+	p.PlanResourceChangeFn = func(req providers.PlanResourceChangeRequest) providers.PlanResourceChangeResponse {
+		return providers.PlanResourceChangeResponse{
+			PlannedState: req.ProposedNewState,
+		}
+	}
 	ui := cli.NewMockUi()
 	c := &PlanCommand{
 		Meta: Meta{
@@ -318,7 +342,7 @@ func TestPlan_outBackend(t *testing.T) {
 	}
 	if code := c.Run(args); code != 0 {
 		t.Logf("stdout: %s", ui.OutputWriter.String())
-		t.Fatalf("bad: %d\n\n%s", code, ui.ErrorWriter.String())
+		t.Fatalf("plan command failed with exit code %d\n\n%s", code, ui.ErrorWriter.String())
 	}
 
 	plan := testReadPlan(t, outPath)
@@ -326,11 +350,26 @@ func TestPlan_outBackend(t *testing.T) {
 		t.Fatalf("Expected empty plan to be written to plan file, got: %s", spew.Sdump(plan))
 	}
 
-	if plan.Backend.Type == "" || plan.Backend.Config == nil {
-		t.Fatal("should have backend info")
+	if got, want := plan.Backend.Type, "http"; got != want {
+		t.Errorf("wrong backend type %q; want %q", got, want)
 	}
-	if !reflect.DeepEqual(plan.Backend, dataState.Backend) {
-		t.Fatalf("wrong backend config in plan\ngot:  %swant: %s", spew.Sdump(plan.Backend), spew.Sdump(dataState.Backend))
+	if got, want := plan.Backend.Workspace, "default"; got != want {
+		t.Errorf("wrong backend workspace %q; want %q", got, want)
+	}
+	{
+		httpBackend := backendinit.Backend("http")()
+		schema := httpBackend.ConfigSchema()
+		got, err := plan.Backend.Config.Decode(schema.ImpliedType())
+		if err != nil {
+			t.Fatalf("failed to decode backend config in plan: %s", err)
+		}
+		want, err := dataState.Backend.Config(schema)
+		if err != nil {
+			t.Fatalf("failed to decode cached config: %s", err)
+		}
+		if !want.RawEquals(got) {
+			t.Errorf("wrong backend config\ngot:  %#v\nwant: %#v", got, want)
+		}
 	}
 }
 
@@ -647,6 +686,38 @@ func TestPlan_varFileDefault(t *testing.T) {
 	}
 }
 
+func TestPlan_varFileWithDecls(t *testing.T) {
+	tmp, cwd := testCwd(t)
+	defer testFixCwd(t, tmp, cwd)
+
+	varFilePath := testTempFile(t)
+	if err := ioutil.WriteFile(varFilePath, []byte(planVarFileWithDecl), 0644); err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	p := planVarsFixtureProvider()
+	ui := cli.NewMockUi()
+	c := &PlanCommand{
+		Meta: Meta{
+			testingOverrides: metaOverridesForProvider(p),
+			Ui:               ui,
+		},
+	}
+
+	args := []string{
+		"-var-file", varFilePath,
+		testFixturePath("plan-vars"),
+	}
+	if code := c.Run(args); code == 0 {
+		t.Fatalf("succeeded; want failure\n\n%s", ui.OutputWriter.String())
+	}
+
+	msg := ui.ErrorWriter.String()
+	if got, want := msg, "Variable declaration in .tfvars file"; !strings.Contains(got, want) {
+		t.Fatalf("missing expected error message\nwant message containing %q\ngot:\n%s", want, got)
+	}
+}
+
 func TestPlan_detailedExitcode(t *testing.T) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -761,16 +832,18 @@ func TestPlan_shutdown(t *testing.T) {
 		"-state=nonexistent.tfstate",
 		testFixturePath("apply-shutdown"),
 	})
-	if code != 1 {
-		// FIXME: we should be able to avoid the error during evaluation
-		// the early exit isn't caught before the interpolation is evaluated
-		t.Fatalf("wrong exit code %d; want 1\noutput:\n%s", code, ui.OutputWriter.String())
+	if code != 0 {
+		// FIXME: In retrospect cancellation ought to be an unsuccessful exit
+		// case, but we need to do that cautiously in case it impacts automation
+		// wrappers. See the note about this in the terraform.stopHook
+		// implementation for more.
+		t.Errorf("wrong exit code %d; want 0\noutput:\n%s", code, ui.OutputWriter.String())
 	}
 
 	select {
 	case <-cancelled:
 	default:
-		t.Fatal("command not cancelled")
+		t.Error("command not cancelled")
 	}
 }
 
@@ -849,6 +922,13 @@ func planVarsFixtureProvider() *terraform.MockProvider {
 
 const planVarFile = `
 foo = "bar"
+`
+
+const planVarFileWithDecl = `
+foo = "bar"
+
+variable "nope" {
+}
 `
 
 const testPlanNoStateStr = `

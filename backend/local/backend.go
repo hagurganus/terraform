@@ -9,10 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
-
-	"github.com/hashicorp/terraform/tfdiags"
 
 	"github.com/hashicorp/terraform/backend"
 	"github.com/hashicorp/terraform/command/clistate"
@@ -20,6 +17,7 @@ import (
 	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/hashicorp/terraform/states/statemgr"
 	"github.com/hashicorp/terraform/terraform"
+	"github.com/hashicorp/terraform/tfdiags"
 	"github.com/mitchellh/cli"
 	"github.com/mitchellh/colorstring"
 	"github.com/zclconf/go-cty/cty"
@@ -63,6 +61,14 @@ type Local struct {
 	StateBackupPath   string
 	StateWorkspaceDir string
 
+	// The OverrideState* paths are set based on per-operation CLI arguments
+	// and will override what'd be built from the State* fields if non-empty.
+	// While the interpretation of the State* fields depends on the active
+	// workspace, the OverrideState* fields are always used literally.
+	OverrideStatePath       string
+	OverrideStateOutPath    string
+	OverrideStateBackupPath string
+
 	// We only want to create a single instance of a local state, so store them
 	// here as they're loaded.
 	states map[string]statemgr.Full
@@ -96,11 +102,24 @@ type Local struct {
 	// exact commands that are being run.
 	RunningInAutomation bool
 
+	// opLock locks operations
 	opLock sync.Mutex
-	once   sync.Once
 }
 
 var _ backend.Backend = (*Local)(nil)
+
+// New returns a new initialized local backend.
+func New() *Local {
+	return NewWithBackend(nil)
+}
+
+// NewWithBackend returns a new local backend initialized with a
+// dedicated backend for non-enhanced behavior.
+func NewWithBackend(backend backend.Backend) *Local {
+	return &Local{
+		Backend: backend,
+	}
+}
 
 func (b *Local) ConfigSchema() *configschema.Block {
 	if b.Backend != nil {
@@ -116,15 +135,13 @@ func (b *Local) ConfigSchema() *configschema.Block {
 				Type:     cty.String,
 				Optional: true,
 			},
-			// environment_dir was previously a deprecated alias for
-			// workspace_dir, but now removed.
 		},
 	}
 }
 
-func (b *Local) ValidateConfig(obj cty.Value) tfdiags.Diagnostics {
+func (b *Local) PrepareConfig(obj cty.Value) (cty.Value, tfdiags.Diagnostics) {
 	if b.Backend != nil {
-		return b.Backend.ValidateConfig(obj)
+		return b.Backend.PrepareConfig(obj)
 	}
 
 	var diags tfdiags.Diagnostics
@@ -153,7 +170,7 @@ func (b *Local) ValidateConfig(obj cty.Value) tfdiags.Diagnostics {
 		}
 	}
 
-	return diags
+	return obj, diags
 }
 
 func (b *Local) Configure(obj cty.Value) tfdiags.Diagnostics {
@@ -240,8 +257,6 @@ func (b *Local) DeleteWorkspace(name string) error {
 }
 
 func (b *Local) StateMgr(name string) (statemgr.Full, error) {
-	statePath, stateOutPath, backupPath := b.StatePaths(name)
-
 	// If we have a backend handling state, delegate to that.
 	if b.Backend != nil {
 		return b.Backend.StateMgr(name)
@@ -254,6 +269,9 @@ func (b *Local) StateMgr(name string) (statemgr.Full, error) {
 	if err := b.createState(name); err != nil {
 		return nil, err
 	}
+
+	statePath, stateOutPath, backupPath := b.StatePaths(name)
+	log.Printf("[TRACE] backend/local: state manager for workspace %q will:\n - read initial snapshot from %s\n - write new snapshots to %s\n - create any backup at %s", name, statePath, stateOutPath, backupPath)
 
 	s := statemgr.NewFilesystemBetweenPaths(statePath, stateOutPath)
 	if backupPath != "" {
@@ -342,7 +360,7 @@ func (b *Local) Operation(ctx context.Context, op *backend.Operation) (*backend.
 	return runningOp, nil
 }
 
-// opWait wats for the operation to complete, and a stop signal or a
+// opWait waits for the operation to complete, and a stop signal or a
 // cancelation signal.
 func (b *Local) opWait(
 	doneCh <-chan struct{},
@@ -416,7 +434,10 @@ func (b *Local) ReportResult(op *backend.RunningOperation, diags tfdiags.Diagnos
 		// Shouldn't generally happen, but if it does then we'll at least
 		// make some noise in the logs to help us spot it.
 		if len(diags) != 0 {
-			log.Printf("[ERROR] Local backend needs to report diagnostics but ShowDiagnostics callback is not set: %s", diags.ErrWithWarnings())
+			log.Printf(
+				"[ERROR] Local backend needs to report diagnostics but ShowDiagnostics is not set:\n%s",
+				diags.ErrWithWarnings(),
+			)
 		}
 	}
 }
@@ -471,26 +492,31 @@ func (b *Local) schemaConfigure(ctx context.Context) error {
 // StatePaths returns the StatePath, StateOutPath, and StateBackupPath as
 // configured from the CLI.
 func (b *Local) StatePaths(name string) (stateIn, stateOut, backupOut string) {
-	statePath := b.StatePath
-	stateOutPath := b.StateOutPath
-	backupPath := b.StateBackupPath
+	statePath := b.OverrideStatePath
+	stateOutPath := b.OverrideStateOutPath
+	backupPath := b.OverrideStateBackupPath
 
-	if name == "" {
-		name = backend.DefaultStateName
+	isDefault := name == backend.DefaultStateName || name == ""
+
+	baseDir := ""
+	if !isDefault {
+		baseDir = filepath.Join(b.stateWorkspaceDir(), name)
 	}
 
-	if name == backend.DefaultStateName {
-		if statePath == "" {
-			statePath = DefaultStateFilename
+	if statePath == "" {
+		if isDefault {
+			statePath = b.StatePath // s.StatePath applies only to the default workspace, since StateWorkspaceDir is used otherwise
 		}
-	} else {
-		statePath = filepath.Join(b.stateWorkspaceDir(), name, DefaultStateFilename)
+		if statePath == "" {
+			statePath = filepath.Join(baseDir, DefaultStateFilename)
+		}
 	}
-
 	if stateOutPath == "" {
 		stateOutPath = statePath
 	}
-
+	if backupPath == "" {
+		backupPath = b.StateBackupPath
+	}
 	switch backupPath {
 	case "-":
 		backupPath = ""
@@ -499,6 +525,42 @@ func (b *Local) StatePaths(name string) (stateIn, stateOut, backupOut string) {
 	}
 
 	return statePath, stateOutPath, backupPath
+}
+
+// PathsConflictWith returns true if any state path used by a workspace in
+// the receiver is the same as any state path used by the other given
+// local backend instance.
+//
+// This should be used when "migrating" from one local backend configuration to
+// another in order to avoid deleting the "old" state snapshots if they are
+// in the same files as the "new" state snapshots.
+func (b *Local) PathsConflictWith(other *Local) bool {
+	otherPaths := map[string]struct{}{}
+	otherWorkspaces, err := other.Workspaces()
+	if err != nil {
+		// If we can't enumerate the workspaces then we'll conservatively
+		// assume that paths _do_ overlap, since we can't be certain.
+		return true
+	}
+	for _, name := range otherWorkspaces {
+		p, _, _ := other.StatePaths(name)
+		otherPaths[p] = struct{}{}
+	}
+
+	ourWorkspaces, err := other.Workspaces()
+	if err != nil {
+		// If we can't enumerate the workspaces then we'll conservatively
+		// assume that paths _do_ overlap, since we can't be certain.
+		return true
+	}
+
+	for _, name := range ourWorkspaces {
+		p, _, _ := b.StatePaths(name)
+		if _, exists := otherPaths[p]; exists {
+			return true
+		}
+	}
+	return false
 }
 
 // this only ensures that the named directory exists
@@ -531,25 +593,3 @@ func (b *Local) stateWorkspaceDir() string {
 
 	return DefaultWorkspaceDir
 }
-
-func (b *Local) pluginInitRequired(providerErr *terraform.ResourceProviderError) {
-	b.CLI.Output(b.Colorize().Color(fmt.Sprintf(
-		strings.TrimSpace(errPluginInit)+"\n",
-		providerErr)))
-}
-
-// this relies on multierror to format the plugin errors below the copy
-const errPluginInit = `
-[reset][bold][yellow]Plugin reinitialization required. Please run "terraform init".[reset]
-[yellow]Reason: Could not satisfy plugin requirements.
-
-Plugins are external binaries that Terraform uses to access and manipulate
-resources. The configuration provided requires plugins which can't be located,
-don't satisfy the version constraints, or are otherwise incompatible.
-
-[reset][red]%s
-
-[reset][yellow]Terraform automatically discovers provider requirements from your
-configuration, including providers used in child modules. To see the
-requirements and constraints from each module, run "terraform providers".
-`

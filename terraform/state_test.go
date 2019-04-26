@@ -689,6 +689,291 @@ func TestStateMarshalEqual(t *testing.T) {
 	}
 }
 
+func TestStateRemove(t *testing.T) {
+	cases := map[string]struct {
+		Address  string
+		One, Two *State
+	}{
+		"simple resource": {
+			"test_instance.foo",
+			&State{
+				Modules: []*ModuleState{
+					&ModuleState{
+						Path: rootModulePath,
+						Resources: map[string]*ResourceState{
+							"test_instance.foo": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+
+							"test_instance.bar": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+						},
+					},
+				},
+			},
+			&State{
+				Modules: []*ModuleState{
+					&ModuleState{
+						Path: rootModulePath,
+						Resources: map[string]*ResourceState{
+							"test_instance.bar": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+
+		"single instance": {
+			"test_instance.foo.primary",
+			&State{
+				Modules: []*ModuleState{
+					&ModuleState{
+						Path: rootModulePath,
+						Resources: map[string]*ResourceState{
+							"test_instance.foo": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+						},
+					},
+				},
+			},
+			&State{
+				Modules: []*ModuleState{
+					&ModuleState{
+						Path:      rootModulePath,
+						Resources: map[string]*ResourceState{},
+					},
+				},
+			},
+		},
+
+		"single instance in multi-count": {
+			"test_instance.foo[0]",
+			&State{
+				Modules: []*ModuleState{
+					&ModuleState{
+						Path: rootModulePath,
+						Resources: map[string]*ResourceState{
+							"test_instance.foo.0": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+
+							"test_instance.foo.1": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+						},
+					},
+				},
+			},
+			&State{
+				Modules: []*ModuleState{
+					&ModuleState{
+						Path: rootModulePath,
+						Resources: map[string]*ResourceState{
+							"test_instance.foo.1": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+
+		"single resource, multi-count": {
+			"test_instance.foo",
+			&State{
+				Modules: []*ModuleState{
+					&ModuleState{
+						Path: rootModulePath,
+						Resources: map[string]*ResourceState{
+							"test_instance.foo.0": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+
+							"test_instance.foo.1": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+						},
+					},
+				},
+			},
+			&State{
+				Modules: []*ModuleState{
+					&ModuleState{
+						Path:      rootModulePath,
+						Resources: map[string]*ResourceState{},
+					},
+				},
+			},
+		},
+
+		"full module": {
+			"module.foo",
+			&State{
+				Modules: []*ModuleState{
+					&ModuleState{
+						Path: rootModulePath,
+						Resources: map[string]*ResourceState{
+							"test_instance.foo": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+						},
+					},
+
+					&ModuleState{
+						Path: []string{"root", "foo"},
+						Resources: map[string]*ResourceState{
+							"test_instance.foo": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+
+							"test_instance.bar": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+						},
+					},
+				},
+			},
+			&State{
+				Modules: []*ModuleState{
+					&ModuleState{
+						Path: rootModulePath,
+						Resources: map[string]*ResourceState{
+							"test_instance.foo": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+
+		"module and children": {
+			"module.foo",
+			&State{
+				Modules: []*ModuleState{
+					&ModuleState{
+						Path: rootModulePath,
+						Resources: map[string]*ResourceState{
+							"test_instance.foo": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+						},
+					},
+
+					&ModuleState{
+						Path: []string{"root", "foo"},
+						Resources: map[string]*ResourceState{
+							"test_instance.foo": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+
+							"test_instance.bar": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+						},
+					},
+
+					&ModuleState{
+						Path: []string{"root", "foo", "bar"},
+						Resources: map[string]*ResourceState{
+							"test_instance.foo": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+
+							"test_instance.bar": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+						},
+					},
+				},
+			},
+			&State{
+				Modules: []*ModuleState{
+					&ModuleState{
+						Path: rootModulePath,
+						Resources: map[string]*ResourceState{
+							"test_instance.foo": &ResourceState{
+								Type: "test_instance",
+								Primary: &InstanceState{
+									ID: "foo",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for k, tc := range cases {
+		if err := tc.One.Remove(tc.Address); err != nil {
+			t.Fatalf("bad: %s\n\n%s", k, err)
+		}
+
+		if !tc.One.Equal(tc.Two) {
+			t.Fatalf("Bad: %s\n\n%s\n\n%s", k, tc.One.String(), tc.Two.String())
+		}
+	}
+}
+
 func TestResourceStateEqual(t *testing.T) {
 	cases := []struct {
 		Result   bool
@@ -1558,6 +1843,20 @@ func TestReadState_pruneDependencies(t *testing.T) {
 
 	if len(resourceDeps) > 1 || resourceDeps[0] != "aws_instance.baz" {
 		t.Fatalf("expected 1 resource depends_on entry, got  %q", resourceDeps)
+	}
+}
+
+func TestReadState_bigHash(t *testing.T) {
+	expected := uint64(14885267135666261723)
+	s := strings.NewReader(`{"version": 3, "backend":{"hash":14885267135666261723}}`)
+
+	actual, err := ReadState(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if actual.Backend.Hash != expected {
+		t.Fatalf("expected backend hash %d, got %d", expected, actual.Backend.Hash)
 	}
 }
 

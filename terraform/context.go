@@ -172,16 +172,18 @@ func NewContext(opts *ContextOpts) (*Context, tfdiags.Diagnostics) {
 	// Bind available provider plugins to the constraints in config
 	var providerFactories map[string]providers.Factory
 	if opts.ProviderResolver != nil {
-		var err error
 		deps := ConfigTreeDependencies(opts.Config, state)
 		reqd := deps.AllPluginRequirements()
 		if opts.ProviderSHA256s != nil && !opts.SkipProviderVerify {
 			reqd.LockExecutables(opts.ProviderSHA256s)
 		}
 		log.Printf("[TRACE] terraform.NewContext: resolving provider version selections")
-		providerFactories, err = resourceProviderFactories(opts.ProviderResolver, reqd)
-		if err != nil {
-			diags = diags.Append(err)
+
+		var providerDiags tfdiags.Diagnostics
+		providerFactories, providerDiags = resourceProviderFactories(opts.ProviderResolver, reqd)
+		diags = diags.Append(providerDiags)
+
+		if diags.HasErrors() {
 			return nil, diags
 		}
 	} else {
@@ -901,14 +903,14 @@ func parseVariableAsHCL(name string, input string, targetType config.VariableTyp
 	}
 }
 
-// shimLegacyState is a helper that takes the legacy state type and
+// ShimLegacyState is a helper that takes the legacy state type and
 // converts it to the new state type.
 //
 // This is implemented as a state file upgrade, so it will not preserve
 // parts of the state structure that are not included in a serialized state,
 // such as the resolved results of any local values, outputs in non-root
 // modules, etc.
-func shimLegacyState(legacy *State) (*states.State, error) {
+func ShimLegacyState(legacy *State) (*states.State, error) {
 	if legacy == nil {
 		return nil, nil
 	}
@@ -928,7 +930,7 @@ func shimLegacyState(legacy *State) (*states.State, error) {
 // the conversion does not succeed. This is primarily intended for tests where
 // the given legacy state is an object constructed within the test.
 func MustShimLegacyState(legacy *State) *states.State {
-	ret, err := shimLegacyState(legacy)
+	ret, err := ShimLegacyState(legacy)
 	if err != nil {
 		panic(err)
 	}

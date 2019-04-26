@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/terraform/config/hcl2shim"
 	"github.com/hashicorp/terraform/configs/configschema"
 	"github.com/hashicorp/terraform/providers"
+	"github.com/hashicorp/terraform/states"
 )
 
 func TestContext2Refresh(t *testing.T) {
@@ -85,6 +86,79 @@ func TestContext2Refresh(t *testing.T) {
 
 	if !cmp.Equal(readState, newState, valueComparer) {
 		t.Fatal(cmp.Diff(readState, newState, valueComparer, equateEmpty))
+	}
+}
+
+func TestContext2Refresh_dynamicAttr(t *testing.T) {
+	m := testModule(t, "refresh-dynamic")
+
+	startingState := states.BuildState(func(ss *states.SyncState) {
+		ss.SetResourceInstanceCurrent(
+			addrs.Resource{
+				Mode: addrs.ManagedResourceMode,
+				Type: "test_instance",
+				Name: "foo",
+			}.Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance),
+			&states.ResourceInstanceObjectSrc{
+				Status:    states.ObjectReady,
+				AttrsJSON: []byte(`{"dynamic":{"type":"string","value":"hello"}}`),
+			},
+			addrs.ProviderConfig{
+				Type: "test",
+			}.Absolute(addrs.RootModuleInstance),
+		)
+	})
+
+	readStateVal := cty.ObjectVal(map[string]cty.Value{
+		"dynamic": cty.EmptyTupleVal,
+	})
+
+	p := testProvider("test")
+	p.GetSchemaReturn = &ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_instance": {
+				Attributes: map[string]*configschema.Attribute{
+					"dynamic": {Type: cty.DynamicPseudoType, Optional: true},
+				},
+			},
+		},
+	}
+	p.ReadResourceFn = func(req providers.ReadResourceRequest) providers.ReadResourceResponse {
+		return providers.ReadResourceResponse{
+			NewState: readStateVal,
+		}
+	}
+
+	ctx := testContext2(t, &ContextOpts{
+		Config: m,
+		ProviderResolver: providers.ResolverFixed(
+			map[string]providers.Factory{
+				"test": testProviderFuncFixed(p),
+			},
+		),
+		State: startingState,
+	})
+
+	schema := p.GetSchemaReturn.ResourceTypes["test_instance"]
+	ty := schema.ImpliedType()
+
+	s, diags := ctx.Refresh()
+	if diags.HasErrors() {
+		t.Fatal(diags.Err())
+	}
+
+	if !p.ReadResourceCalled {
+		t.Fatal("ReadResource should be called")
+	}
+
+	mod := s.RootModule()
+	newState, err := mod.Resources["test_instance.foo"].Instances[addrs.NoKey].Current.Decode(ty)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !cmp.Equal(readStateVal, newState.Value, valueComparer) {
+		t.Error(cmp.Diff(newState.Value, readStateVal, valueComparer, equateEmpty))
 	}
 }
 
@@ -902,6 +976,65 @@ func TestContext2Refresh_stateBasic(t *testing.T) {
 	}
 }
 
+func TestContext2Refresh_dataCount(t *testing.T) {
+	p := testProvider("test")
+	m := testModule(t, "refresh-data-count")
+
+	// This test is verifying that a data resource count can refer to a
+	// resource attribute that can't be known yet during refresh (because
+	// the resource in question isn't in the state at all). In that case,
+	// we skip the data resource during refresh and process it during the
+	// subsequent plan step instead.
+	//
+	// Normally it's an error for "count" to be computed, but during the
+	// refresh step we allow it because we _expect_ to be working with an
+	// incomplete picture of the world sometimes, particularly when we're
+	// creating object for the first time against an empty state.
+	//
+	// For more information, see:
+	//    https://github.com/hashicorp/terraform/issues/21047
+
+	p.GetSchemaReturn = &ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test": {
+				Attributes: map[string]*configschema.Attribute{
+					"things": {Type: cty.List(cty.String), Optional: true},
+				},
+			},
+		},
+		DataSources: map[string]*configschema.Block{
+			"test": {},
+		},
+	}
+
+	ctx := testContext2(t, &ContextOpts{
+		ProviderResolver: providers.ResolverFixed(
+			map[string]providers.Factory{
+				"test": testProviderFuncFixed(p),
+			},
+		),
+		Config: m,
+	})
+
+	s, diags := ctx.Refresh()
+	if p.ReadResourceCalled {
+		// The managed resource doesn't exist in the state yet, so there's
+		// nothing to refresh.
+		t.Errorf("ReadResource was called, but should not have been")
+	}
+	if p.ReadDataSourceCalled {
+		// The data resource should've been skipped because its count cannot
+		// be determined yet.
+		t.Errorf("ReadDataSource was called, but should not have been")
+	}
+
+	if diags.HasErrors() {
+		t.Fatalf("refresh errors: %s", diags.Err())
+	}
+
+	checkStateString(t, s, `<no state>`)
+}
+
 func TestContext2Refresh_dataOrphan(t *testing.T) {
 	p := testProvider("null")
 	state := MustShimLegacyState(&State{
@@ -1565,5 +1698,171 @@ aws_instance.bar:
 	actual := state.String()
 	if actual != expected {
 		t.Fatalf("expected:\n%s\n\ngot:\n%s", expected, actual)
+	}
+}
+
+func TestContext2Refresh_schemaUpgradeFlatmap(t *testing.T) {
+	m := testModule(t, "empty")
+	p := testProvider("test")
+	p.GetSchemaReturn = &ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_thing": {
+				Attributes: map[string]*configschema.Attribute{
+					"name": { // imagining we renamed this from "id"
+						Type:     cty.String,
+						Optional: true,
+					},
+				},
+			},
+		},
+		ResourceTypeSchemaVersions: map[string]uint64{
+			"test_thing": 5,
+		},
+	}
+	p.UpgradeResourceStateResponse = providers.UpgradeResourceStateResponse{
+		UpgradedState: cty.ObjectVal(map[string]cty.Value{
+			"name": cty.StringVal("foo"),
+		}),
+	}
+
+	s := states.BuildState(func(s *states.SyncState) {
+		s.SetResourceInstanceCurrent(
+			addrs.Resource{
+				Mode: addrs.ManagedResourceMode,
+				Type: "test_thing",
+				Name: "bar",
+			}.Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance),
+			&states.ResourceInstanceObjectSrc{
+				Status:        states.ObjectReady,
+				SchemaVersion: 3,
+				AttrsFlat: map[string]string{
+					"id": "foo",
+				},
+			},
+			addrs.ProviderConfig{Type: "test"}.Absolute(addrs.RootModuleInstance),
+		)
+	})
+
+	ctx := testContext2(t, &ContextOpts{
+		Config: m,
+		ProviderResolver: providers.ResolverFixed(
+			map[string]providers.Factory{
+				"test": testProviderFuncFixed(p),
+			},
+		),
+		State: s,
+	})
+
+	state, diags := ctx.Refresh()
+	if diags.HasErrors() {
+		t.Fatal(diags.Err())
+	}
+
+	{
+		got := p.UpgradeResourceStateRequest
+		want := providers.UpgradeResourceStateRequest{
+			TypeName: "test_thing",
+			Version:  3,
+			RawStateFlatmap: map[string]string{
+				"id": "foo",
+			},
+		}
+		if !cmp.Equal(got, want) {
+			t.Errorf("wrong upgrade request\n%s", cmp.Diff(want, got))
+		}
+	}
+
+	{
+		got := state.String()
+		want := strings.TrimSpace(`
+test_thing.bar:
+  ID = 
+  provider = provider.test
+  name = foo
+`)
+		if got != want {
+			t.Fatalf("wrong result state\ngot:\n%s\n\nwant:\n%s", got, want)
+		}
+	}
+}
+
+func TestContext2Refresh_schemaUpgradeJSON(t *testing.T) {
+	m := testModule(t, "empty")
+	p := testProvider("test")
+	p.GetSchemaReturn = &ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_thing": {
+				Attributes: map[string]*configschema.Attribute{
+					"name": { // imagining we renamed this from "id"
+						Type:     cty.String,
+						Optional: true,
+					},
+				},
+			},
+		},
+		ResourceTypeSchemaVersions: map[string]uint64{
+			"test_thing": 5,
+		},
+	}
+	p.UpgradeResourceStateResponse = providers.UpgradeResourceStateResponse{
+		UpgradedState: cty.ObjectVal(map[string]cty.Value{
+			"name": cty.StringVal("foo"),
+		}),
+	}
+
+	s := states.BuildState(func(s *states.SyncState) {
+		s.SetResourceInstanceCurrent(
+			addrs.Resource{
+				Mode: addrs.ManagedResourceMode,
+				Type: "test_thing",
+				Name: "bar",
+			}.Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance),
+			&states.ResourceInstanceObjectSrc{
+				Status:        states.ObjectReady,
+				SchemaVersion: 3,
+				AttrsJSON:     []byte(`{"id":"foo"}`),
+			},
+			addrs.ProviderConfig{Type: "test"}.Absolute(addrs.RootModuleInstance),
+		)
+	})
+
+	ctx := testContext2(t, &ContextOpts{
+		Config: m,
+		ProviderResolver: providers.ResolverFixed(
+			map[string]providers.Factory{
+				"test": testProviderFuncFixed(p),
+			},
+		),
+		State: s,
+	})
+
+	state, diags := ctx.Refresh()
+	if diags.HasErrors() {
+		t.Fatal(diags.Err())
+	}
+
+	{
+		got := p.UpgradeResourceStateRequest
+		want := providers.UpgradeResourceStateRequest{
+			TypeName:     "test_thing",
+			Version:      3,
+			RawStateJSON: []byte(`{"id":"foo"}`),
+		}
+		if !cmp.Equal(got, want) {
+			t.Errorf("wrong upgrade request\n%s", cmp.Diff(want, got))
+		}
+	}
+
+	{
+		got := state.String()
+		want := strings.TrimSpace(`
+test_thing.bar:
+  ID = 
+  provider = provider.test
+  name = foo
+`)
+		if got != want {
+			t.Fatalf("wrong result state\ngot:\n%s\n\nwant:\n%s", got, want)
+		}
 	}
 }

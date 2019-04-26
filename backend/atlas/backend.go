@@ -12,7 +12,6 @@ import (
 
 	"github.com/hashicorp/terraform/backend"
 	"github.com/hashicorp/terraform/configs/configschema"
-	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/hashicorp/terraform/state"
 	"github.com/hashicorp/terraform/state/remote"
 	"github.com/hashicorp/terraform/terraform"
@@ -43,14 +42,16 @@ type Backend struct {
 	// stateClient is the legacy state client, setup in Configure
 	stateClient *stateClient
 
-	// schema is the schema for configuration, set by init
-	schema *schema.Backend
-
 	// opLock locks operations
 	opLock sync.Mutex
 }
 
 var _ backend.Backend = (*Backend)(nil)
+
+// New returns a new initialized Atlas backend.
+func New() *Backend {
+	return &Backend{}
+}
 
 func (b *Backend) ConfigSchema() *configschema.Block {
 	return &configschema.Block{
@@ -74,7 +75,7 @@ func (b *Backend) ConfigSchema() *configschema.Block {
 	}
 }
 
-func (b *Backend) ValidateConfig(obj cty.Value) tfdiags.Diagnostics {
+func (b *Backend) PrepareConfig(obj cty.Value) (cty.Value, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 
 	name := obj.GetAttr("name").AsString()
@@ -100,7 +101,7 @@ func (b *Backend) ValidateConfig(obj cty.Value) tfdiags.Diagnostics {
 		}
 	}
 
-	return diags
+	return obj, diags
 }
 
 func (b *Backend) Configure(obj cty.Value) tfdiags.Diagnostics {
@@ -111,7 +112,7 @@ func (b *Backend) Configure(obj cty.Value) tfdiags.Diagnostics {
 		RunId: os.Getenv("ATLAS_RUN_ID"),
 	}
 
-	name := obj.GetAttr("name").AsString() // assumed valid due to ValidateConfig method
+	name := obj.GetAttr("name").AsString() // assumed valid due to PrepareConfig method
 	slashIdx := strings.Index(name, "/")
 	client.User = name[:slashIdx]
 	client.Name = name[slashIdx+1:]
@@ -134,7 +135,7 @@ func (b *Backend) Configure(obj cty.Value) tfdiags.Diagnostics {
 		addr := v.AsString()
 		addrURL, err := url.Parse(addr)
 		if err != nil {
-			// We already validated the URL in ValidateConfig, so this shouldn't happen
+			// We already validated the URL in PrepareConfig, so this shouldn't happen
 			panic(err)
 		}
 		client.Server = addr
@@ -163,16 +164,16 @@ func (b *Backend) Configure(obj cty.Value) tfdiags.Diagnostics {
 }
 
 func (b *Backend) Workspaces() ([]string, error) {
-	return nil, backend.ErrNamedStatesNotSupported
+	return nil, backend.ErrWorkspacesNotSupported
 }
 
 func (b *Backend) DeleteWorkspace(name string) error {
-	return backend.ErrNamedStatesNotSupported
+	return backend.ErrWorkspacesNotSupported
 }
 
 func (b *Backend) StateMgr(name string) (state.State, error) {
 	if name != backend.DefaultStateName {
-		return nil, backend.ErrNamedStatesNotSupported
+		return nil, backend.ErrWorkspacesNotSupported
 	}
 
 	return &remote.State{Client: b.stateClient}, nil

@@ -9,7 +9,6 @@ import (
 	"github.com/hashicorp/hcl2/hcl"
 	"github.com/hashicorp/hcl2/hcl/hclsyntax"
 	hcljson "github.com/hashicorp/hcl2/hcl/json"
-
 	"github.com/hashicorp/terraform/backend"
 	"github.com/hashicorp/terraform/configs"
 	"github.com/hashicorp/terraform/terraform"
@@ -59,12 +58,12 @@ func (m *Meta) collectVariableValues() (map[string]backend.UnparsedVariableValue
 	// (DefaultVarsFilename) along with the later-added search for all files
 	// ending in .auto.tfvars.
 	if _, err := os.Stat(DefaultVarsFilename); err == nil {
-		moreDiags := m.addVarsFromFile(DefaultVarsFilename, terraform.ValueFromFile, ret)
+		moreDiags := m.addVarsFromFile(DefaultVarsFilename, terraform.ValueFromAutoFile, ret)
 		diags = diags.Append(moreDiags)
 	}
 	const defaultVarsFilenameJSON = DefaultVarsFilename + ".json"
 	if _, err := os.Stat(defaultVarsFilenameJSON); err == nil {
-		moreDiags := m.addVarsFromFile(defaultVarsFilenameJSON, terraform.ValueFromFile, ret)
+		moreDiags := m.addVarsFromFile(defaultVarsFilenameJSON, terraform.ValueFromAutoFile, ret)
 		diags = diags.Append(moreDiags)
 	}
 	if infos, err := ioutil.ReadDir("."); err == nil {
@@ -74,7 +73,7 @@ func (m *Meta) collectVariableValues() (map[string]backend.UnparsedVariableValue
 			if !isAutoVarFile(name) {
 				continue
 			}
-			moreDiags := m.addVarsFromFile(name, terraform.ValueFromFile, ret)
+			moreDiags := m.addVarsFromFile(name, terraform.ValueFromAutoFile, ret)
 			diags = diags.Append(moreDiags)
 		}
 	}
@@ -106,7 +105,7 @@ func (m *Meta) collectVariableValues() (map[string]backend.UnparsedVariableValue
 			}
 
 		case "-var-file":
-			moreDiags := m.addVarsFromFile(rawFlag.Value, terraform.ValueFromFile, ret)
+			moreDiags := m.addVarsFromFile(rawFlag.Value, terraform.ValueFromNamedFile, ret)
 			diags = diags.Append(moreDiags)
 
 		default:
@@ -162,6 +161,37 @@ func (m *Meta) addVarsFromFile(filename string, sourceType terraform.ValueSource
 		f, hclDiags = hclsyntax.ParseConfig(src, filename, hcl.Pos{Line: 1, Column: 1})
 		diags = diags.Append(hclDiags)
 		if f == nil || f.Body == nil {
+			return diags
+		}
+	}
+
+	// Before we do our real decode, we'll probe to see if there are any blocks
+	// of type "variable" in this body, since it's a common mistake for new
+	// users to put variable declarations in tfvars rather than variable value
+	// definitions, and otherwise our error message for that case is not so
+	// helpful.
+	{
+		content, _, _ := f.Body.PartialContent(&hcl.BodySchema{
+			Blocks: []hcl.BlockHeaderSchema{
+				{
+					Type:       "variable",
+					LabelNames: []string{"name"},
+				},
+			},
+		})
+		for _, block := range content.Blocks {
+			name := block.Labels[0]
+			diags = diags.Append(&hcl.Diagnostic{
+				Severity: hcl.DiagError,
+				Summary:  "Variable declaration in .tfvars file",
+				Detail:   fmt.Sprintf("A .tfvars file is used to assign values to variables that have already been declared in .tf files, not to declare new variables. To declare variable %q, place this block in one of your .tf files, such as variables.tf.\n\nTo set a value for this variable in %s, use the definition syntax instead:\n    %s = <value>", name, block.TypeRange.Filename, name),
+				Subject:  &block.TypeRange,
+			})
+		}
+		if diags.HasErrors() {
+			// If we already found problems then JustAttributes below will find
+			// the same problems with less-helpful messages, so we'll bail for
+			// now to let the user focus on the immediate problem.
 			return diags
 		}
 	}

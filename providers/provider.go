@@ -86,7 +86,7 @@ type GetSchemaResponse struct {
 // Schema pairs a provider or resource schema with that schema's version.
 // This is used to be able to upgrade the schema in UpgradeResourceState.
 type Schema struct {
-	Version uint64
+	Version int64
 	Block   *configschema.Block
 }
 
@@ -135,7 +135,7 @@ type UpgradeResourceStateRequest struct {
 	TypeName string
 
 	// Version is version of the schema that created the current state.
-	Version int
+	Version int64
 
 	// RawStateJSON and RawStateFlatmap contiain the state that needs to be
 	// upgraded to match the current schema version. Because the schema is
@@ -226,6 +226,13 @@ type PlanResourceChangeResponse struct {
 
 	// Diagnostics contains any warnings or errors from the method call.
 	Diagnostics tfdiags.Diagnostics
+
+	// LegacyTypeSystem is set only if the provider is using the legacy SDK
+	// whose type system cannot be precisely mapped into the Terraform type
+	// system. We use this to bypass certain consistency checks that would
+	// otherwise fail due to this imprecise mapping. No other provider or SDK
+	// implementation is permitted to set this.
+	LegacyTypeSystem bool
 }
 
 type ApplyResourceChangeRequest struct {
@@ -261,6 +268,13 @@ type ApplyResourceChangeResponse struct {
 
 	// Diagnostics contains any warnings or errors from the method call.
 	Diagnostics tfdiags.Diagnostics
+
+	// LegacyTypeSystem is set only if the provider is using the legacy SDK
+	// whose type system cannot be precisely mapped into the Terraform type
+	// system. We use this to bypass certain consistency checks that would
+	// otherwise fail due to this imprecise mapping. No other provider or SDK
+	// implementation is permitted to set this.
+	LegacyTypeSystem bool
 }
 
 type ImportResourceStateRequest struct {

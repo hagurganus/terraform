@@ -347,14 +347,17 @@ func hcl2ValueFromFlatmapSet(m map[string]string, prefix string, ty cty.Type) (c
 		return cty.UnknownVal(ty), nil
 	}
 
-	// We actually don't really care about the "count" of a set for our
-	// purposes here, but we do need to check if it _exists_ in order to
-	// recognize the difference between null (not set at all) and empty.
-	if strCount, exists := m[prefix+"#"]; !exists {
+	strCount, exists := m[prefix+"#"]
+	if !exists {
 		return cty.NullVal(ty), nil
 	} else if strCount == UnknownVariableValue {
 		return cty.UnknownVal(ty), nil
 	}
+
+	// Keep track of keys we've seen, se we don't add the same set value
+	// multiple times. The cty.Set will normally de-duplicate values, but we may
+	// have unknown values that would not show as equivalent.
+	seen := map[string]bool{}
 
 	for fullKey := range m {
 		if !strings.HasPrefix(fullKey, prefix) {
@@ -370,6 +373,12 @@ func hcl2ValueFromFlatmapSet(m map[string]string, prefix string, ty cty.Type) (c
 			key = fullKey[:dot+len(prefix)]
 		}
 
+		if seen[key] {
+			continue
+		}
+
+		seen[key] = true
+
 		// The flatmap format doesn't allow us to distinguish between keys
 		// that contain periods and nested objects, so by convention a
 		// map is only ever of primitive type in flatmap, and we just assume
@@ -383,8 +392,33 @@ func hcl2ValueFromFlatmapSet(m map[string]string, prefix string, ty cty.Type) (c
 		vals = append(vals, val)
 	}
 
-	if len(vals) == 0 {
+	if len(vals) == 0 && strCount == "1" {
+		// An empty set wouldn't be represented in the flatmap, so this must be
+		// a single empty object since the count is actually 1.
+		// Add an appropriately typed null value to the set.
+		var val cty.Value
+		switch {
+		case ety.IsMapType():
+			val = cty.MapValEmpty(ety)
+		case ety.IsListType():
+			val = cty.ListValEmpty(ety)
+		case ety.IsSetType():
+			val = cty.SetValEmpty(ety)
+		case ety.IsObjectType():
+			// TODO: cty.ObjectValEmpty
+			objectMap := map[string]cty.Value{}
+			for attr, ty := range ety.AttributeTypes() {
+				objectMap[attr] = cty.NullVal(ty)
+			}
+			val = cty.ObjectVal(objectMap)
+		default:
+			val = cty.NullVal(ety)
+		}
+		vals = append(vals, val)
+
+	} else if len(vals) == 0 {
 		return cty.SetValEmpty(ety), nil
 	}
+
 	return cty.SetVal(vals), nil
 }

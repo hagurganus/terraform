@@ -5,12 +5,12 @@ import (
 	"log"
 	"strconv"
 
-	"github.com/hashicorp/terraform/addrs"
-
 	"github.com/hashicorp/hcl2/ext/dynblock"
 	"github.com/hashicorp/hcl2/hcl"
 	"github.com/hashicorp/hcl2/hcldec"
+	"github.com/hashicorp/terraform/addrs"
 	"github.com/hashicorp/terraform/configs/configschema"
+	"github.com/hashicorp/terraform/lang/blocktoattr"
 	"github.com/hashicorp/terraform/tfdiags"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
@@ -25,7 +25,7 @@ import (
 func (s *Scope) ExpandBlock(body hcl.Body, schema *configschema.Block) (hcl.Body, tfdiags.Diagnostics) {
 	spec := schema.DecoderSpec()
 
-	traversals := dynblock.ForEachVariablesHCLDec(body, spec)
+	traversals := dynblock.ExpandVariablesHCLDec(body, spec)
 	refs, diags := References(traversals)
 
 	ctx, ctxDiags := s.EvalContext(refs)
@@ -47,11 +47,23 @@ func (s *Scope) ExpandBlock(body hcl.Body, schema *configschema.Block) (hcl.Body
 func (s *Scope) EvalBlock(body hcl.Body, schema *configschema.Block) (cty.Value, tfdiags.Diagnostics) {
 	spec := schema.DecoderSpec()
 
-	traversals := hcldec.Variables(body, spec)
-	refs, diags := References(traversals)
+	refs, diags := ReferencesInBlock(body, schema)
 
 	ctx, ctxDiags := s.EvalContext(refs)
 	diags = diags.Append(ctxDiags)
+	if diags.HasErrors() {
+		// We'll stop early if we found problems in the references, because
+		// it's likely evaluation will produce redundant copies of the same errors.
+		return cty.UnknownVal(schema.ImpliedType()), diags
+	}
+
+	// HACK: In order to remain compatible with some assumptions made in
+	// Terraform v0.11 and earlier about the approximate equivalence of
+	// attribute vs. block syntax, we do a just-in-time fixup here to allow
+	// any attribute in the schema that has a list-of-objects or set-of-objects
+	// kind to potentially be populated instead by one or more nested blocks
+	// whose type is the attribute name.
+	body = blocktoattr.FixUpBlockAttrs(body, schema)
 
 	val, evalDiags := hcldec.Decode(body, spec, ctx)
 	diags = diags.Append(evalDiags)
@@ -74,20 +86,27 @@ func (s *Scope) EvalExpr(expr hcl.Expression, wantType cty.Type) (cty.Value, tfd
 
 	ctx, ctxDiags := s.EvalContext(refs)
 	diags = diags.Append(ctxDiags)
+	if diags.HasErrors() {
+		// We'll stop early if we found problems in the references, because
+		// it's likely evaluation will produce redundant copies of the same errors.
+		return cty.UnknownVal(wantType), diags
+	}
 
 	val, evalDiags := expr.Value(ctx)
 	diags = diags.Append(evalDiags)
 
-	var convErr error
-	val, convErr = convert.Convert(val, wantType)
-	if convErr != nil {
-		val = cty.UnknownVal(wantType)
-		diags = diags.Append(&hcl.Diagnostic{
-			Severity: hcl.DiagError,
-			Summary:  "Incorrect value type",
-			Detail:   fmt.Sprintf("Invalid expression value: %s.", tfdiags.FormatError(convErr)),
-			Subject:  expr.Range().Ptr(),
-		})
+	if wantType != cty.DynamicPseudoType {
+		var convErr error
+		val, convErr = convert.Convert(val, wantType)
+		if convErr != nil {
+			val = cty.UnknownVal(wantType)
+			diags = diags.Append(&hcl.Diagnostic{
+				Severity: hcl.DiagError,
+				Summary:  "Incorrect value type",
+				Detail:   fmt.Sprintf("Invalid expression value: %s.", tfdiags.FormatError(convErr)),
+				Subject:  expr.Range().Ptr(),
+			})
+		}
 	}
 
 	return val, diags
@@ -142,6 +161,10 @@ func (s *Scope) EvalContext(refs []*addrs.Reference) (*hcl.EvalContext, tfdiags.
 }
 
 func (s *Scope) evalContext(refs []*addrs.Reference, selfAddr addrs.Referenceable) (*hcl.EvalContext, tfdiags.Diagnostics) {
+	if s == nil {
+		panic("attempt to construct EvalContext for nil Scope")
+	}
+
 	var diags tfdiags.Diagnostics
 	vals := make(map[string]cty.Value)
 	funcs := s.Functions()
@@ -152,6 +175,14 @@ func (s *Scope) evalContext(refs []*addrs.Reference, selfAddr addrs.Referenceabl
 
 	if len(refs) == 0 {
 		// Easy path for common case where there are no references at all.
+		return ctx, diags
+	}
+
+	// First we'll do static validation of the references. This catches things
+	// early that might otherwise not get caught due to unknown values being
+	// present in the scope during planning.
+	if staticDiags := s.Data.StaticValidateReferences(refs, selfAddr); staticDiags.HasErrors() {
+		diags = diags.Append(staticDiags)
 		return ctx, diags
 	}
 

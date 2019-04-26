@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/zclconf/go-cty/cty"
-
 	"github.com/hashicorp/terraform/backend"
-	backendinit "github.com/hashicorp/terraform/backend/init"
 	"github.com/hashicorp/terraform/configs/configschema"
 	"github.com/hashicorp/terraform/providers"
 	"github.com/hashicorp/terraform/tfdiags"
+	"github.com/zclconf/go-cty/cty"
+
+	backendInit "github.com/hashicorp/terraform/backend/init"
 )
 
 func dataSourceRemoteStateGetSchema() providers.Schema {
@@ -58,7 +58,7 @@ func dataSourceRemoteStateRead(d *cty.Value) (cty.Value, tfdiags.Diagnostics) {
 
 	// Create the client to access our remote state
 	log.Printf("[DEBUG] Initializing remote state backend: %s", backendType)
-	f := backendinit.Backend(backendType)
+	f := backendInit.Backend(backendType)
 	if f == nil {
 		diags = diags.Append(tfdiags.AttributeValue(
 			tfdiags.Error,
@@ -92,11 +92,12 @@ func dataSourceRemoteStateRead(d *cty.Value) (cty.Value, tfdiags.Diagnostics) {
 		return cty.NilVal, diags
 	}
 
-	validateDiags := b.ValidateConfig(configVal)
+	newVal, validateDiags := b.PrepareConfig(configVal)
 	diags = diags.Append(validateDiags)
 	if validateDiags.HasErrors() {
 		return cty.NilVal, diags
 	}
+	configVal = newVal
 
 	configureDiags := b.Configure(configVal)
 	if configureDiags.HasErrors() {
@@ -104,17 +105,14 @@ func dataSourceRemoteStateRead(d *cty.Value) (cty.Value, tfdiags.Diagnostics) {
 		return cty.NilVal, diags
 	}
 
-	var name string
+	name := backend.DefaultStateName
 
 	if workspaceVal := d.GetAttr("workspace"); !workspaceVal.IsNull() {
 		newState["workspace"] = workspaceVal
-		ws := workspaceVal.AsString()
-		if ws != backend.DefaultStateName {
-			name = ws
-		}
-	} else {
-		newState["workspace"] = cty.NullVal(cty.String)
+		name = workspaceVal.AsString()
 	}
+
+	newState["workspace"] = cty.StringVal(name)
 
 	state, err := b.StateMgr(name)
 	if err != nil {

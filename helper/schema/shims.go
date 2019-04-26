@@ -6,6 +6,7 @@ import (
 	"github.com/zclconf/go-cty/cty"
 	ctyjson "github.com/zclconf/go-cty/cty/json"
 
+	"github.com/hashicorp/terraform/config"
 	"github.com/hashicorp/terraform/configs/configschema"
 	"github.com/hashicorp/terraform/terraform"
 )
@@ -23,11 +24,16 @@ func DiffFromValues(prior, planned cty.Value, res *Resource) (*terraform.Instanc
 // only needs to be created for the apply operation, and any customizations
 // have already been done.
 func diffFromValues(prior, planned cty.Value, res *Resource, cust CustomizeDiffFunc) (*terraform.InstanceDiff, error) {
-	instanceState := InstanceStateFromStateValue(prior, res.SchemaVersion)
+	instanceState, err := res.ShimInstanceStateFromValue(prior)
+	if err != nil {
+		return nil, err
+	}
 
 	configSchema := res.CoreConfigSchema()
 
 	cfg := terraform.NewResourceConfigShimmed(planned, configSchema)
+	removeConfigUnknowns(cfg.Config)
+	removeConfigUnknowns(cfg.Raw)
 
 	diff, err := schemaMap(res.Schema).Diff(instanceState, cfg, cust, nil, false)
 	if err != nil {
@@ -35,6 +41,28 @@ func diffFromValues(prior, planned cty.Value, res *Resource, cust CustomizeDiffF
 	}
 
 	return diff, err
+}
+
+// During apply the only unknown values are those which are to be computed by
+// the resource itself. These may have been marked as unknown config values, and
+// need to be removed to prevent the UnknownVariableValue from appearing the diff.
+func removeConfigUnknowns(cfg map[string]interface{}) {
+	for k, v := range cfg {
+		switch v := v.(type) {
+		case string:
+			if v == config.UnknownVariableValue {
+				delete(cfg, k)
+			}
+		case []interface{}:
+			for _, i := range v {
+				if m, ok := i.(map[string]interface{}); ok {
+					removeConfigUnknowns(m)
+				}
+			}
+		case map[string]interface{}:
+			removeConfigUnknowns(v)
+		}
+	}
 }
 
 // ApplyDiff takes a cty.Value state and applies a terraform.InstanceDiff to
@@ -86,10 +114,44 @@ func StateValueFromInstanceState(is *terraform.InstanceState, ty cty.Type) (cty.
 	return is.AttrsAsObjectValue(ty)
 }
 
-// InstanceStateFromStateValue converts a cty.Value to a
-// terraform.InstanceState. This function requires the schema version used by
-// the provider, because the legacy providers used the private Meta data in the
-// InstanceState to store the schema version.
-func InstanceStateFromStateValue(state cty.Value, schemaVersion int) *terraform.InstanceState {
-	return terraform.NewInstanceStateShimmedFromValue(state, schemaVersion)
+// LegacyResourceSchema takes a *Resource and returns a deep copy with 0.12 specific
+// features removed. This is used by the shims to get a configschema that
+// directly matches the structure of the schema.Resource.
+func LegacyResourceSchema(r *Resource) *Resource {
+	if r == nil {
+		return nil
+	}
+	// start with a shallow copy
+	newResource := new(Resource)
+	*newResource = *r
+	newResource.Schema = map[string]*Schema{}
+
+	for k, s := range r.Schema {
+		newResource.Schema[k] = LegacySchema(s)
+	}
+
+	return newResource
+}
+
+// LegacySchema takes a *Schema and returns a deep copy with some 0.12-specific
+// features disabled. This is used by the shims to get a configschema that
+// better reflects the given schema.Resource, without any adjustments we
+// make for when sending a schema to Terraform Core.
+func LegacySchema(s *Schema) *Schema {
+	if s == nil {
+		return nil
+	}
+	// start with a shallow copy
+	newSchema := new(Schema)
+	*newSchema = *s
+	newSchema.SkipCoreTypeCheck = false
+
+	switch e := newSchema.Elem.(type) {
+	case *Schema:
+		newSchema.Elem = LegacySchema(e)
+	case *Resource:
+		newSchema.Elem = LegacyResourceSchema(e)
+	}
+
+	return newSchema
 }

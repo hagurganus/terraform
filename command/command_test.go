@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/hashicorp/terraform/internal/initwd"
+	"github.com/hashicorp/terraform/registry"
 	"io"
 	"io/ioutil"
 	"log"
@@ -19,10 +21,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/zclconf/go-cty/cty"
-
 	"github.com/hashicorp/terraform/addrs"
-	backendinit "github.com/hashicorp/terraform/backend/init"
 	"github.com/hashicorp/terraform/configs"
 	"github.com/hashicorp/terraform/configs/configload"
 	"github.com/hashicorp/terraform/configs/configschema"
@@ -36,10 +35,16 @@ import (
 	"github.com/hashicorp/terraform/states/statemgr"
 	"github.com/hashicorp/terraform/terraform"
 	"github.com/hashicorp/terraform/version"
+	"github.com/zclconf/go-cty/cty"
+
+	backendInit "github.com/hashicorp/terraform/backend/init"
 )
 
-// This is the directory where our test fixtures are.
-var fixtureDir = "./test-fixtures"
+// These are the directories for our test data and fixtures.
+var (
+	fixtureDir  = "./test-fixtures"
+	testDataDir = "./testdata"
+)
 
 // a top level temp directory which will be cleaned after all tests
 var testingDir string
@@ -47,10 +52,18 @@ var testingDir string
 func init() {
 	test = true
 
-	// Expand the fixture dir on init because we change the working
-	// directory in some tests.
+	// Initialize the backends
+	backendInit.Init(nil)
+
+	// Expand the data and fixture dirs on init because
+	// we change the working directory in some tests.
 	var err error
 	fixtureDir, err = filepath.Abs(fixtureDir)
+	if err != nil {
+		panic(err)
+	}
+
+	testDataDir, err = filepath.Abs(testDataDir)
 	if err != nil {
 		panic(err)
 	}
@@ -74,7 +87,7 @@ func TestMain(m *testing.M) {
 	}
 
 	// Make sure backend init is initialized, since our tests tend to assume it.
-	backendinit.Init(nil)
+	backendInit.Init(nil)
 
 	os.Exit(m.Run())
 }
@@ -130,7 +143,6 @@ func testModuleWithSnapshot(t *testing.T, name string) (*configs.Config, *config
 	t.Helper()
 
 	dir := filepath.Join(fixtureDir, name)
-
 	// FIXME: We're not dealing with the cleanup function here because
 	// this testModule function is used all over and so we don't want to
 	// change its interface at this late stage.
@@ -139,9 +151,10 @@ func testModuleWithSnapshot(t *testing.T, name string) (*configs.Config, *config
 	// Test modules usually do not refer to remote sources, and for local
 	// sources only this ultimately just records all of the module paths
 	// in a JSON file so that we can load them below.
-	diags := loader.InstallModules(dir, true, configload.InstallHooksImpl{})
-	if diags.HasErrors() {
-		t.Fatal(diags.Error())
+	inst := initwd.NewModuleInstaller(loader.ModulesDir(), registry.NewClient(nil, nil))
+	_, instDiags := inst.InstallModules(dir, true, initwd.ModuleInstallHooksImpl{})
+	if instDiags.HasErrors() {
+		t.Fatal(instDiags.Err())
 	}
 
 	config, snap, diags := loader.LoadConfigWithSnapshot(dir)
@@ -661,6 +674,19 @@ func testInputMap(t *testing.T, answers map[string]string) func() {
 // testBackendState is used to make a test HTTP server to test a configured
 // backend. This returns the complete state that can be saved. Use
 // `testStateFileRemote` to write the returned state.
+//
+// When using this function, the configuration fixture for the test must
+// include an empty configuration block for the HTTP backend, like this:
+//
+// terraform {
+//   backend "http" {
+//   }
+// }
+//
+// If such a block isn't present, or if it isn't empty, then an error will
+// be returned about the backend configuration having changed and that
+// "terraform init" must be run, since the test backend config cache created
+// by this function contains the hash for an empty configuration.
 func testBackendState(t *testing.T, s *terraform.State, c int) (*terraform.State, *httptest.Server) {
 	t.Helper()
 
@@ -693,11 +719,19 @@ func testBackendState(t *testing.T, s *terraform.State, c int) (*terraform.State
 
 	srv := httptest.NewServer(http.HandlerFunc(cb))
 
+	backendConfig := &configs.Backend{
+		Type:   "http",
+		Config: configs.SynthBody("<testBackendState>", map[string]cty.Value{}),
+	}
+	b := backendInit.Backend("http")()
+	configSchema := b.ConfigSchema()
+	hash := backendConfig.Hash(configSchema)
+
 	state := terraform.NewState()
 	state.Backend = &terraform.BackendState{
 		Type:      "http",
 		ConfigRaw: json.RawMessage(fmt.Sprintf(`{"address":%q}`, srv.URL)),
-		Hash:      2529831861221416334,
+		Hash:      uint64(hash),
 	}
 
 	return state, srv
@@ -759,7 +793,7 @@ func testRemoteState(t *testing.T, s *states.State, c int) (*terraform.State, *h
 
 // testlockState calls a separate process to the lock the state file at path.
 // deferFunc should be called in the caller to properly unlock the file.
-// Since many tests change the working durectory, the sourcedir argument must be
+// Since many tests change the working directory, the sourcedir argument must be
 // supplied to locate the statelocker.go source.
 func testLockState(sourceDir, path string) (func(), error) {
 	// build and run the binary ourselves so we can quickly terminate it for cleanup
@@ -774,7 +808,10 @@ func testLockState(sourceDir, path string) (func(), error) {
 	source := filepath.Join(sourceDir, "statelocker.go")
 	lockBin := filepath.Join(buildDir, "statelocker")
 
-	out, err := exec.Command("go", "build", "-o", lockBin, source).CombinedOutput()
+	cmd := exec.Command("go", "build", "-mod=vendor", "-o", lockBin, source)
+	cmd.Dir = filepath.Dir(sourceDir)
+
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		cleanFunc()
 		return nil, fmt.Errorf("%s %s", err, out)

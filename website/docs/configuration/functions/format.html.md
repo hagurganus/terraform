@@ -1,6 +1,6 @@
 ---
 layout: "functions"
-page_title: "format function"
+page_title: "format - Functions - Configuration Language"
 sidebar_current: "docs-funcs-string-format-x"
 description: |-
   The format function produces a string by formatting a number of other values
@@ -8,6 +8,10 @@ description: |-
 ---
 
 # `format` Function
+
+-> **Note:** This page is about Terraform 0.12 and later. For Terraform 0.11 and
+earlier, see
+[0.11 Configuration Language: Interpolation Syntax](../../configuration-0-11/interpolation.html).
 
 `format` produces a string by formatting a number of other values according
 to a specification string. It is similar to the `printf` function in C, and
@@ -115,5 +119,7 @@ for an unsupported format verb.
 
 ## Related Functions
 
+* [`formatdate`](./formatdate.html) is a specialized formatting function for
+  human-readable timestamps.
 * [`formatlist`](./formatlist.html) uses the same specification syntax to
   produce a list of strings.

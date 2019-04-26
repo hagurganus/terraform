@@ -42,6 +42,21 @@ func TestState(t *testing.T) {
 			Type: "test",
 		}.Absolute(addrs.RootModuleInstance),
 	)
+	rootModule.SetResourceInstanceCurrent(
+		addrs.Resource{
+			Mode: addrs.DataResourceMode,
+			Type: "test_data_source",
+			Name: "data",
+		}.Instance(addrs.NoKey),
+		&states.ResourceInstanceObjectSrc{
+			Status:        states.ObjectReady,
+			SchemaVersion: 1,
+			AttrsJSON:     []byte(`{"compute":"sure"}`),
+		},
+		addrs.ProviderConfig{
+			Type: "test",
+		}.Absolute(addrs.RootModuleInstance),
+	)
 
 	tests := []struct {
 		State *StateOpts
@@ -62,6 +77,14 @@ func TestState(t *testing.T) {
 				Schemas: testSchemas(),
 			},
 			TestOutput,
+		},
+		{
+			&StateOpts{
+				State:   nestedState(t),
+				Color:   disabledColorize,
+				Schemas: testSchemas(),
+			},
+			nestedTestOutput,
 		},
 	}
 
@@ -101,6 +124,17 @@ func testProviderSchema() *terraform.ProviderSchema {
 					"foo":     {Type: cty.String, Optional: true},
 					"woozles": {Type: cty.String, Optional: true},
 				},
+				BlockTypes: map[string]*configschema.NestedBlock{
+					"nested": {
+						Nesting: configschema.NestingList,
+						Block: configschema.Block{
+							Attributes: map[string]*configschema.Attribute{
+								"compute": {Type: cty.String, Optional: true},
+								"value":   {Type: cty.String, Optional: true},
+							},
+						},
+					},
+				},
 			},
 		},
 		DataSources: map[string]*configschema.Block{
@@ -123,7 +157,12 @@ func testSchemas() *terraform.Schemas {
 	}
 }
 
-const TestOutput = `# test_resource.baz[0]: 
+const TestOutput = `# data.test_data_source.data: 
+data "test_data_source" "data" {
+    compute = "sure"
+}
+
+# test_resource.baz[0]: 
 resource "test_resource" "baz" {
     woozles = "confuzles"
 }
@@ -132,3 +171,40 @@ resource "test_resource" "baz" {
 Outputs:
 
 bar = "bar value"`
+
+const nestedTestOutput = `# test_resource.baz[0]: 
+resource "test_resource" "baz" {
+    woozles = "confuzles"
+
+    nested {
+        value = "42"
+    }
+}
+
+`
+
+func nestedState(t *testing.T) *states.State {
+	state := states.NewState()
+
+	rootModule := state.RootModule()
+	if rootModule == nil {
+		t.Errorf("root module is nil; want valid object")
+	}
+
+	rootModule.SetResourceInstanceCurrent(
+		addrs.Resource{
+			Mode: addrs.ManagedResourceMode,
+			Type: "test_resource",
+			Name: "baz",
+		}.Instance(addrs.IntKey(0)),
+		&states.ResourceInstanceObjectSrc{
+			Status:        states.ObjectReady,
+			SchemaVersion: 1,
+			AttrsJSON:     []byte(`{"woozles":"confuzles","nested": [{"value": "42"}]}`),
+		},
+		addrs.ProviderConfig{
+			Type: "test",
+		}.Absolute(addrs.RootModuleInstance),
+	)
+	return state
+}

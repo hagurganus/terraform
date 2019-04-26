@@ -21,9 +21,9 @@ func (c *RefreshCommand) Run(args []string) int {
 		return 1
 	}
 
-	cmdFlags := c.Meta.flagSet("refresh")
+	cmdFlags := c.Meta.extendedFlagSet("refresh")
 	cmdFlags.StringVar(&c.Meta.statePath, "state", DefaultStateFilename, "path")
-	cmdFlags.IntVar(&c.Meta.parallelism, "parallelism", 0, "parallelism")
+	cmdFlags.IntVar(&c.Meta.parallelism, "parallelism", DefaultParallelism, "parallelism")
 	cmdFlags.StringVar(&c.Meta.stateOutPath, "state-out", "", "path")
 	cmdFlags.StringVar(&c.Meta.backupPath, "backup", "", "path")
 	cmdFlags.BoolVar(&c.Meta.stateLock, "lock", true, "lock state")
@@ -72,13 +72,15 @@ func (c *RefreshCommand) Run(args []string) int {
 
 	// Build the operation
 	opReq := c.Operation(b)
-	opReq.Type = backend.OperationTypeRefresh
 	opReq.ConfigDir = configPath
+	opReq.Type = backend.OperationTypeRefresh
+
 	opReq.ConfigLoader, err = c.initConfigLoader()
 	if err != nil {
 		c.showDiagnostics(err)
 		return 1
 	}
+
 	{
 		var moreDiags tfdiags.Diagnostics
 		opReq.Variables, moreDiags = c.collectVariableValues()

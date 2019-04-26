@@ -24,12 +24,11 @@ import (
 func testStepConfig(
 	opts terraform.ContextOpts,
 	state *terraform.State,
-	step TestStep,
-	schemas *terraform.Schemas) (*terraform.State, error) {
-	return testStep(opts, state, step, schemas)
+	step TestStep) (*terraform.State, error) {
+	return testStep(opts, state, step)
 }
 
-func testStep(opts terraform.ContextOpts, state *terraform.State, step TestStep, schemas *terraform.Schemas) (*terraform.State, error) {
+func testStep(opts terraform.ContextOpts, state *terraform.State, step TestStep) (*terraform.State, error) {
 	if !step.Destroy {
 		if err := testStepTaint(state, step); err != nil {
 			return state, err
@@ -45,7 +44,11 @@ func testStep(opts terraform.ContextOpts, state *terraform.State, step TestStep,
 
 	// Build the context
 	opts.Config = cfg
-	opts.State = terraform.MustShimLegacyState(state)
+	opts.State, err = terraform.ShimLegacyState(state)
+	if err != nil {
+		return nil, err
+	}
+
 	opts.Destroy = step.Destroy
 	ctx, stepDiags := terraform.NewContext(&opts)
 	if stepDiags.HasErrors() {
@@ -53,7 +56,7 @@ func testStep(opts terraform.ContextOpts, state *terraform.State, step TestStep,
 	}
 	if stepDiags := ctx.Validate(); len(stepDiags) > 0 {
 		if stepDiags.HasErrors() {
-			return nil, errwrap.Wrapf("config is invalid: {{err}}", stepDiags.Err())
+			return state, errwrap.Wrapf("config is invalid: {{err}}", stepDiags.Err())
 		}
 
 		log.Printf("[WARN] Config warnings:\n%s", stepDiags)
@@ -61,9 +64,14 @@ func testStep(opts terraform.ContextOpts, state *terraform.State, step TestStep,
 
 	// Refresh!
 	newState, stepDiags := ctx.Refresh()
-	state = mustShimNewState(newState, schemas)
+	// shim the state first so the test can check the state on errors
+
+	state, err = shimNewState(newState, step.providers)
+	if err != nil {
+		return nil, err
+	}
 	if stepDiags.HasErrors() {
-		return state, fmt.Errorf("Error refreshing: %s", stepDiags.Err())
+		return state, newOperationError("refresh", stepDiags)
 	}
 
 	// If this step is a PlanOnly step, skip over this first Plan and subsequent
@@ -71,7 +79,7 @@ func testStep(opts terraform.ContextOpts, state *terraform.State, step TestStep,
 	if !step.PlanOnly {
 		// Plan!
 		if p, stepDiags := ctx.Plan(); stepDiags.HasErrors() {
-			return state, fmt.Errorf("Error planning: %s", stepDiags.Err())
+			return state, newOperationError("plan", stepDiags)
 		} else {
 			log.Printf("[WARN] Test: Step plan: %s", legacyPlanComparisonString(newState, p.Changes))
 		}
@@ -83,9 +91,13 @@ func testStep(opts terraform.ContextOpts, state *terraform.State, step TestStep,
 
 		// Apply the diff, creating real resources.
 		newState, stepDiags = ctx.Apply()
-		state = mustShimNewState(newState, schemas)
+		// shim the state first so the test can check the state on errors
+		state, err = shimNewState(newState, step.providers)
+		if err != nil {
+			return nil, err
+		}
 		if stepDiags.HasErrors() {
-			return state, fmt.Errorf("Error applying: %s", stepDiags.Err())
+			return state, newOperationError("apply", stepDiags)
 		}
 
 		// Run any configured checks
@@ -106,7 +118,7 @@ func testStep(opts terraform.ContextOpts, state *terraform.State, step TestStep,
 	// We do this with TWO plans. One without a refresh.
 	var p *plans.Plan
 	if p, stepDiags = ctx.Plan(); stepDiags.HasErrors() {
-		return state, fmt.Errorf("Error on follow-up plan: %s", stepDiags.Err())
+		return state, newOperationError("follow-up plan", stepDiags)
 	}
 	if !p.Changes.Empty() {
 		if step.ExpectNonEmptyPlan {
@@ -121,12 +133,16 @@ func testStep(opts terraform.ContextOpts, state *terraform.State, step TestStep,
 	if !step.Destroy || (step.Destroy && !step.PreventPostDestroyRefresh) {
 		newState, stepDiags = ctx.Refresh()
 		if stepDiags.HasErrors() {
-			return state, fmt.Errorf("Error on follow-up refresh: %s", stepDiags.Err())
+			return state, newOperationError("follow-up refresh", stepDiags)
 		}
-		state = mustShimNewState(newState, schemas)
+
+		state, err = shimNewState(newState, step.providers)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if p, stepDiags = ctx.Plan(); stepDiags.HasErrors() {
-		return state, fmt.Errorf("Error on second follow-up plan: %s", stepDiags.Err())
+		return state, newOperationError("second follow-up refresh", stepDiags)
 	}
 	empty := p.Changes.Empty()
 
@@ -171,7 +187,7 @@ func testStep(opts terraform.ContextOpts, state *terraform.State, step TestStep,
 //
 // This is here only for compatibility with existing tests that predate our
 // new plan and state types, and should not be used in new tests. Instead, use
-// a library like "cmp" to do a deep equality check and diff on the two
+// a library like "cmp" to do a deep equality  and diff on the two
 // data structures.
 func legacyPlanComparisonString(state *states.State, changes *plans.Changes) string {
 	return fmt.Sprintf(
@@ -198,6 +214,7 @@ func legacyDiffComparisonString(changes *plans.Changes) string {
 	}
 	byModule := map[string]map[string]*ResourceChanges{}
 	resourceKeys := map[string][]string{}
+	requiresReplace := map[string][]string{}
 	var moduleKeys []string
 	for _, rc := range changes.Resources {
 		if rc.Action == plans.NoOp {
@@ -223,6 +240,12 @@ func legacyDiffComparisonString(changes *plans.Changes) string {
 		} else {
 			byModule[moduleKey][resourceKey].Deposed[rc.DeposedKey] = rc
 		}
+
+		rr := []string{}
+		for _, p := range rc.RequiredReplace.List() {
+			rr = append(rr, hcl2shim.FlatmapKeyFromPath(p))
+		}
+		requiresReplace[resourceKey] = rr
 	}
 	sort.Strings(moduleKeys)
 	for _, ks := range resourceKeys {
@@ -237,6 +260,8 @@ func legacyDiffComparisonString(changes *plans.Changes) string {
 
 		for _, resourceKey := range resourceKeys[moduleKey] {
 			rc := rcs[resourceKey]
+
+			forceNewAttrs := requiresReplace[resourceKey]
 
 			crud := "UPDATE"
 			if rc.Current != nil {
@@ -325,7 +350,17 @@ func legacyDiffComparisonString(changes *plans.Changes) string {
 				// at the core layer.
 
 				updateMsg := ""
-				// TODO: Mark " (forces new resource)" in updateMsg when appropriate.
+
+				// This may not be as precise as in the old diff, as it matches
+				// everything under the attribute that was originally marked as
+				// ForceNew, but should help make it easier to determine what
+				// caused replacement here.
+				for _, k := range forceNewAttrs {
+					if strings.HasPrefix(attrK, k) {
+						updateMsg = " (forces new resource)"
+						break
+					}
+				}
 
 				fmt.Fprintf(
 					&mBuf, "  %s:%s %#v => %#v%s\n",

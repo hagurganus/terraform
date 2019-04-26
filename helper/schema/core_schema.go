@@ -39,14 +39,42 @@ func (m schemaMap) CoreConfigSchema() *configschema.Block {
 			ret.Attributes[name] = schema.coreConfigSchemaAttribute()
 			continue
 		}
-		switch schema.Elem.(type) {
-		case *Schema, ValueType:
+		if schema.Type == TypeMap {
+			// For TypeMap in particular, it isn't valid for Elem to be a
+			// *Resource (since that would be ambiguous in flatmap) and
+			// so Elem is treated as a TypeString schema if so. This matches
+			// how the field readers treat this situation, for compatibility
+			// with configurations targeting Terraform 0.11 and earlier.
+			if _, isResource := schema.Elem.(*Resource); isResource {
+				sch := *schema // shallow copy
+				sch.Elem = &Schema{
+					Type: TypeString,
+				}
+				ret.Attributes[name] = sch.coreConfigSchemaAttribute()
+				continue
+			}
+		}
+		switch schema.ConfigMode {
+		case SchemaConfigModeAttr:
 			ret.Attributes[name] = schema.coreConfigSchemaAttribute()
-		case *Resource:
+		case SchemaConfigModeBlock:
 			ret.BlockTypes[name] = schema.coreConfigSchemaBlock()
-		default:
-			// Should never happen for a valid schema
-			panic(fmt.Errorf("invalid Schema.Elem %#v; need *Schema or *Resource", schema.Elem))
+		default: // SchemaConfigModeAuto, or any other invalid value
+			if schema.Computed && !schema.Optional {
+				// Computed-only schemas are always handled as attributes,
+				// because they never appear in configuration.
+				ret.Attributes[name] = schema.coreConfigSchemaAttribute()
+				continue
+			}
+			switch schema.Elem.(type) {
+			case *Schema, ValueType:
+				ret.Attributes[name] = schema.coreConfigSchemaAttribute()
+			case *Resource:
+				ret.BlockTypes[name] = schema.coreConfigSchemaBlock()
+			default:
+				// Should never happen for a valid schema
+				panic(fmt.Errorf("invalid Schema.Elem %#v; need *Schema or *Resource", schema.Elem))
+			}
 		}
 	}
 
@@ -58,10 +86,39 @@ func (m schemaMap) CoreConfigSchema() *configschema.Block {
 // Elem is an instance of Schema. Use coreConfigSchemaBlock for collections
 // whose elem is a whole resource.
 func (s *Schema) coreConfigSchemaAttribute() *configschema.Attribute {
+	// The Schema.DefaultFunc capability adds some extra weirdness here since
+	// it can be combined with "Required: true" to create a sitution where
+	// required-ness is conditional. Terraform Core doesn't share this concept,
+	// so we must sniff for this possibility here and conditionally turn
+	// off the "Required" flag if it looks like the DefaultFunc is going
+	// to provide a value.
+	// This is not 100% true to the original interface of DefaultFunc but
+	// works well enough for the EnvDefaultFunc and MultiEnvDefaultFunc
+	// situations, which are the main cases we care about.
+	//
+	// Note that this also has a consequence for commands that return schema
+	// information for documentation purposes: running those for certain
+	// providers will produce different results depending on which environment
+	// variables are set. We accept that weirdness in order to keep this
+	// interface to core otherwise simple.
+	reqd := s.Required
+	opt := s.Optional
+	if reqd && s.DefaultFunc != nil {
+		v, err := s.DefaultFunc()
+		// We can't report errors from here, so we'll instead just force
+		// "Required" to false and let the provider try calling its
+		// DefaultFunc again during the validate step, where it can then
+		// return the error.
+		if err != nil || (err == nil && v != nil) {
+			reqd = false
+			opt = true
+		}
+	}
+
 	return &configschema.Attribute{
 		Type:        s.coreConfigSchemaType(),
-		Optional:    s.Optional,
-		Required:    s.Required,
+		Optional:    opt,
+		Required:    reqd,
 		Computed:    s.Computed,
 		Sensitive:   s.Sensitive,
 		Description: s.Description,
@@ -96,6 +153,20 @@ func (s *Schema) coreConfigSchemaBlock() *configschema.NestedBlock {
 		// blocks, but we can fake it by requiring at least one item.
 		ret.MinItems = 1
 	}
+	if s.Optional && s.MinItems > 0 {
+		// Historically helper/schema would ignore MinItems if Optional were
+		// set, so we must mimic this behavior here to ensure that providers
+		// relying on that undocumented behavior can continue to operate as
+		// they did before.
+		ret.MinItems = 0
+	}
+	if s.Computed && !s.Optional {
+		// MinItems/MaxItems are meaningless for computed nested blocks, since
+		// they are never set by the user anyway. This ensures that we'll never
+		// generate weird errors about them.
+		ret.MinItems = 0
+		ret.MaxItems = 0
+	}
 
 	return ret
 }
@@ -103,6 +174,14 @@ func (s *Schema) coreConfigSchemaBlock() *configschema.NestedBlock {
 // coreConfigSchemaType determines the core config schema type that corresponds
 // to a particular schema's type.
 func (s *Schema) coreConfigSchemaType() cty.Type {
+	if s.SkipCoreTypeCheck {
+		// If we're preparing a schema for Terraform Core and the schema is
+		// asking us to skip the Core type-check then we'll tell core that this
+		// attribute is dynamically-typed, so it'll just pass through anything
+		// and let us validate it on the plugin side.
+		return cty.DynamicPseudoType
+	}
+
 	switch s.Type {
 	case TypeString:
 		return cty.String
@@ -123,9 +202,10 @@ func (s *Schema) coreConfigSchemaType() cty.Type {
 			// common one so we'll just shim it.
 			elemType = (&Schema{Type: set}).coreConfigSchemaType()
 		case *Resource:
-			// In practice we don't actually use this for normal schema
-			// construction because we construct a NestedBlock in that
-			// case instead. See schemaMap.CoreConfigSchema.
+			// By default we construct a NestedBlock in this case, but this
+			// behavior is selected either for computed-only schemas or
+			// when ConfigMode is explicitly SchemaConfigModeBlock.
+			// See schemaMap.CoreConfigSchema for the exact rules.
 			elemType = set.coreConfigSchema().ImpliedType()
 		default:
 			if set != nil {

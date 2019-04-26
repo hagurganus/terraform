@@ -3,10 +3,20 @@ package hcl2shim
 import (
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp/cmpopts"
+
+	"github.com/google/go-cmp/cmp"
+
 	"github.com/zclconf/go-cty/cty"
+)
+
+var (
+	ignoreUnexported = cmpopts.IgnoreUnexported(cty.GetAttrStep{}, cty.IndexStep{})
+	valueComparer    = cmp.Comparer(cty.Value.RawEquals)
 )
 
 func TestPathFromFlatmap(t *testing.T) {
@@ -217,6 +227,181 @@ func TestPathFromFlatmap(t *testing.T) {
 
 			if !reflect.DeepEqual(got, test.Want) {
 				t.Fatalf("incorrect path\ngot:  %#v\nwant: %#v\n", got, test.Want)
+			}
+		})
+	}
+}
+
+func TestRequiresReplace(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		attrs    []string
+		expected []cty.Path
+		ty       cty.Type
+	}{
+		{
+			name: "basic",
+			attrs: []string{
+				"foo",
+			},
+			ty: cty.Object(map[string]cty.Type{
+				"foo": cty.String,
+			}),
+			expected: []cty.Path{
+				cty.Path{cty.GetAttrStep{Name: "foo"}},
+			},
+		},
+		{
+			name: "two",
+			attrs: []string{
+				"foo",
+				"bar",
+			},
+			ty: cty.Object(map[string]cty.Type{
+				"foo": cty.String,
+				"bar": cty.String,
+			}),
+			expected: []cty.Path{
+				cty.Path{cty.GetAttrStep{Name: "foo"}},
+				cty.Path{cty.GetAttrStep{Name: "bar"}},
+			},
+		},
+		{
+			name: "nested object",
+			attrs: []string{
+				"foo.bar",
+			},
+			ty: cty.Object(map[string]cty.Type{
+				"foo": cty.Object(map[string]cty.Type{
+					"bar": cty.String,
+				}),
+			}),
+			expected: []cty.Path{
+				cty.Path{cty.GetAttrStep{Name: "foo"}, cty.GetAttrStep{Name: "bar"}},
+			},
+		},
+		{
+			name: "nested objects",
+			attrs: []string{
+				"foo.bar.baz",
+			},
+			ty: cty.Object(map[string]cty.Type{
+				"foo": cty.Object(map[string]cty.Type{
+					"bar": cty.Object(map[string]cty.Type{
+						"baz": cty.String,
+					}),
+				}),
+			}),
+			expected: []cty.Path{
+				cty.Path{cty.GetAttrStep{Name: "foo"}, cty.GetAttrStep{Name: "bar"}, cty.GetAttrStep{Name: "baz"}},
+			},
+		},
+		{
+			name: "nested map",
+			attrs: []string{
+				"foo.%",
+				"foo.bar",
+			},
+			ty: cty.Object(map[string]cty.Type{
+				"foo": cty.Map(cty.String),
+			}),
+			expected: []cty.Path{
+				cty.Path{cty.GetAttrStep{Name: "foo"}},
+			},
+		},
+		{
+			name: "nested list",
+			attrs: []string{
+				"foo.#",
+				"foo.1",
+			},
+			ty: cty.Object(map[string]cty.Type{
+				"foo": cty.Map(cty.String),
+			}),
+			expected: []cty.Path{
+				cty.Path{cty.GetAttrStep{Name: "foo"}},
+			},
+		},
+		{
+			name: "object in map",
+			attrs: []string{
+				"foo.bar.baz",
+			},
+			ty: cty.Object(map[string]cty.Type{
+				"foo": cty.Map(cty.Object(
+					map[string]cty.Type{
+						"baz": cty.String,
+					},
+				)),
+			}),
+			expected: []cty.Path{
+				cty.Path{cty.GetAttrStep{Name: "foo"}, cty.IndexStep{Key: cty.StringVal("bar")}, cty.GetAttrStep{Name: "baz"}},
+			},
+		},
+		{
+			name: "object in list",
+			attrs: []string{
+				"foo.1.baz",
+			},
+			ty: cty.Object(map[string]cty.Type{
+				"foo": cty.List(cty.Object(
+					map[string]cty.Type{
+						"baz": cty.String,
+					},
+				)),
+			}),
+			expected: []cty.Path{
+				cty.Path{cty.GetAttrStep{Name: "foo"}, cty.IndexStep{Key: cty.NumberIntVal(1)}, cty.GetAttrStep{Name: "baz"}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rp, err := RequiresReplace(tc.attrs, tc.ty)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cmp.Equal(tc.expected, rp, ignoreUnexported, valueComparer) {
+				t.Fatalf("\nexpected: %#v\ngot: %#v\n", tc.expected, rp)
+			}
+		})
+
+	}
+}
+
+func TestFlatmapKeyFromPath(t *testing.T) {
+	for i, tc := range []struct {
+		path cty.Path
+		attr string
+	}{
+		{
+			path: cty.Path{
+				cty.GetAttrStep{Name: "force_new"},
+			},
+			attr: "force_new",
+		},
+		{
+			path: cty.Path{
+				cty.GetAttrStep{Name: "attr"},
+				cty.IndexStep{Key: cty.NumberIntVal(0)},
+				cty.GetAttrStep{Name: "force_new"},
+			},
+			attr: "attr.0.force_new",
+		},
+		{
+			path: cty.Path{
+				cty.GetAttrStep{Name: "attr"},
+				cty.IndexStep{Key: cty.StringVal("key")},
+				cty.GetAttrStep{Name: "obj_attr"},
+				cty.IndexStep{Key: cty.NumberIntVal(0)},
+				cty.GetAttrStep{Name: "force_new"},
+			},
+			attr: "attr.key.obj_attr.0.force_new",
+		},
+	} {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			attr := FlatmapKeyFromPath(tc.path)
+			if attr != tc.attr {
+				t.Fatalf("expected:%q got:%q", tc.attr, attr)
 			}
 		})
 	}

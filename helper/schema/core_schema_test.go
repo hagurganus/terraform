@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -203,7 +204,18 @@ func TestSchemaMapCoreConfigSchema(t *testing.T) {
 				},
 			},
 			testResource(&configschema.Block{
-				Attributes: map[string]*configschema.Attribute{},
+				Attributes: map[string]*configschema.Attribute{
+					// This one becomes a string attribute because helper/schema
+					// doesn't actually support maps of resource. The given
+					// "Elem" is just ignored entirely here, which is important
+					// because that is also true of the helper/schema logic and
+					// existing providers rely on this being ignored for
+					// correct operation.
+					"map": {
+						Type:     cty.Map(cty.String),
+						Optional: true,
+					},
+				},
 				BlockTypes: map[string]*configschema.NestedBlock{
 					"list": {
 						Nesting:  configschema.NestingList,
@@ -216,9 +228,84 @@ func TestSchemaMapCoreConfigSchema(t *testing.T) {
 						Block:    configschema.Block{},
 						MinItems: 1, // because schema is Required
 					},
-					"map": {
-						Nesting: configschema.NestingMap,
-						Block:   configschema.Block{},
+				},
+			}),
+		},
+		"sub-resource collections minitems+optional": {
+			// This particular case is an odd one where the provider gives
+			// conflicting information about whether a sub-resource is required,
+			// by marking it as optional but also requiring one item.
+			// Historically the optional-ness "won" here, and so we must
+			// honor that for compatibility with providers that relied on this
+			// undocumented interaction.
+			map[string]*Schema{
+				"list": {
+					Type:     TypeList,
+					Optional: true,
+					Elem: &Resource{
+						Schema: map[string]*Schema{},
+					},
+					MinItems: 1,
+					MaxItems: 1,
+				},
+				"set": {
+					Type:     TypeSet,
+					Optional: true,
+					Elem: &Resource{
+						Schema: map[string]*Schema{},
+					},
+					MinItems: 1,
+					MaxItems: 1,
+				},
+			},
+			testResource(&configschema.Block{
+				Attributes: map[string]*configschema.Attribute{},
+				BlockTypes: map[string]*configschema.NestedBlock{
+					"list": {
+						Nesting:  configschema.NestingList,
+						Block:    configschema.Block{},
+						MinItems: 0,
+						MaxItems: 1,
+					},
+					"set": {
+						Nesting:  configschema.NestingSet,
+						Block:    configschema.Block{},
+						MinItems: 0,
+						MaxItems: 1,
+					},
+				},
+			}),
+		},
+		"sub-resource collections minitems+computed": {
+			map[string]*Schema{
+				"list": {
+					Type:     TypeList,
+					Computed: true,
+					Elem: &Resource{
+						Schema: map[string]*Schema{},
+					},
+					MinItems: 1,
+					MaxItems: 1,
+				},
+				"set": {
+					Type:     TypeSet,
+					Computed: true,
+					Elem: &Resource{
+						Schema: map[string]*Schema{},
+					},
+					MinItems: 1,
+					MaxItems: 1,
+				},
+			},
+			testResource(&configschema.Block{
+				Attributes: map[string]*configschema.Attribute{
+					"list": {
+						Type:     cty.List(cty.EmptyObject),
+						Computed: true,
+					},
+					"set": {
+						Type:     cty.Set(cty.EmptyObject),
+						Computed: true,
 					},
 				},
 			}),
@@ -289,6 +376,92 @@ func TestSchemaMapCoreConfigSchema(t *testing.T) {
 						Type:      cty.String,
 						Optional:  true,
 						Sensitive: true,
+					},
+				},
+				BlockTypes: map[string]*configschema.NestedBlock{},
+			}),
+		},
+		"conditionally required on": {
+			map[string]*Schema{
+				"string": {
+					Type:     TypeString,
+					Required: true,
+					DefaultFunc: func() (interface{}, error) {
+						return nil, nil
+					},
+				},
+			},
+			testResource(&configschema.Block{
+				Attributes: map[string]*configschema.Attribute{
+					"string": {
+						Type:     cty.String,
+						Required: true,
+					},
+				},
+				BlockTypes: map[string]*configschema.NestedBlock{},
+			}),
+		},
+		"conditionally required off": {
+			map[string]*Schema{
+				"string": {
+					Type:     TypeString,
+					Required: true,
+					DefaultFunc: func() (interface{}, error) {
+						// If we return a non-nil default then this overrides
+						// the "Required: true" for the purpose of building
+						// the core schema, so that core will ignore it not
+						// being set and let the provider handle it.
+						return "boop", nil
+					},
+				},
+			},
+			testResource(&configschema.Block{
+				Attributes: map[string]*configschema.Attribute{
+					"string": {
+						Type:     cty.String,
+						Optional: true,
+					},
+				},
+				BlockTypes: map[string]*configschema.NestedBlock{},
+			}),
+		},
+		"conditionally required error": {
+			map[string]*Schema{
+				"string": {
+					Type:     TypeString,
+					Required: true,
+					DefaultFunc: func() (interface{}, error) {
+						return nil, fmt.Errorf("placeholder error")
+					},
+				},
+			},
+			testResource(&configschema.Block{
+				Attributes: map[string]*configschema.Attribute{
+					"string": {
+						Type:     cty.String,
+						Optional: true, // Just so we can progress to provider-driven validation and return the error there
+					},
+				},
+				BlockTypes: map[string]*configschema.NestedBlock{},
+			}),
+		},
+		"skip core type check": {
+			map[string]*Schema{
+				"list": {
+					Type:              TypeList,
+					ConfigMode:        SchemaConfigModeAttr,
+					SkipCoreTypeCheck: true,
+					Optional:          true,
+					Elem: &Resource{
+						Schema: map[string]*Schema{},
+					},
+				},
+			},
+			testResource(&configschema.Block{
+				Attributes: map[string]*configschema.Attribute{
+					"list": {
+						Type:     cty.DynamicPseudoType,
+						Optional: true, // Just so we can progress to provider-driven validation and return the error there
 					},
 				},
 				BlockTypes: map[string]*configschema.NestedBlock{},

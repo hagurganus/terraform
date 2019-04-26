@@ -4,18 +4,24 @@ import (
 	"bytes"
 	"io"
 	"io/ioutil"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/davecgh/go-spew/spew"
+	"github.com/zclconf/go-cty/cty"
+
+	backendinit "github.com/hashicorp/terraform/backend/init"
+	"github.com/hashicorp/terraform/configs/configschema"
+	"github.com/hashicorp/terraform/helper/logging"
 	"github.com/hashicorp/terraform/providers"
+	"github.com/hashicorp/terraform/provisioners"
 	"github.com/hashicorp/terraform/terraform"
 )
 
 func TestUpgradeValid(t *testing.T) {
-	t.Skip("configupgrade is not yet complete enough to run tests against")
-
 	// This test uses the contents of the test-fixtures/valid directory as
 	// a table of tests. Every directory there must have both "input" and
 	// "want" subdirectories, where "input" is the configuration to be
@@ -34,7 +40,8 @@ func TestUpgradeValid(t *testing.T) {
 			inputDir := filepath.Join(fixtureDir, entry.Name(), "input")
 			wantDir := filepath.Join(fixtureDir, entry.Name(), "want")
 			u := &Upgrader{
-				Providers: providers.ResolverFixed(testProviders),
+				Providers:    providers.ResolverFixed(testProviders),
+				Provisioners: testProvisioners,
 			}
 
 			inputSrc, err := LoadModule(inputDir)
@@ -46,7 +53,7 @@ func TestUpgradeValid(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			gotSrc, diags := u.Upgrade(inputSrc)
+			gotSrc, diags := u.Upgrade(inputSrc, inputDir)
 			if diags.HasErrors() {
 				t.Error(diags.Err())
 			}
@@ -94,7 +101,7 @@ func TestUpgradeRenameJSON(t *testing.T) {
 	u := &Upgrader{
 		Providers: providers.ResolverFixed(testProviders),
 	}
-	gotSrc, diags := u.Upgrade(inputSrc)
+	gotSrc, diags := u.Upgrade(inputSrc, inputDir)
 	if diags.HasErrors() {
 		t.Error(diags.Err())
 	}
@@ -181,6 +188,118 @@ func diffSourceFilesFallback(got, want []byte) []byte {
 var testProviders = map[string]providers.Factory{
 	"test": providers.Factory(func() (providers.Interface, error) {
 		p := &terraform.MockProvider{}
+		p.GetSchemaReturn = &terraform.ProviderSchema{
+			ResourceTypes: map[string]*configschema.Block{
+				"test_instance": {
+					Attributes: map[string]*configschema.Attribute{
+						"id":              {Type: cty.String, Computed: true},
+						"type":            {Type: cty.String, Optional: true},
+						"image":           {Type: cty.String, Optional: true},
+						"tags":            {Type: cty.Map(cty.String), Optional: true},
+						"security_groups": {Type: cty.List(cty.String), Optional: true},
+						"subnet_ids":      {Type: cty.Set(cty.String), Optional: true},
+						"list_of_obj":     {Type: cty.List(cty.EmptyObject), Optional: true},
+					},
+					BlockTypes: map[string]*configschema.NestedBlock{
+						"network": {
+							Nesting: configschema.NestingSet,
+							Block: configschema.Block{
+								Attributes: map[string]*configschema.Attribute{
+									"cidr_block":   {Type: cty.String, Optional: true},
+									"subnet_cidrs": {Type: cty.Map(cty.String), Computed: true},
+								},
+								BlockTypes: map[string]*configschema.NestedBlock{
+									"subnet": {
+										Nesting: configschema.NestingSet,
+										Block: configschema.Block{
+											Attributes: map[string]*configschema.Attribute{
+												"number": {Type: cty.Number, Required: true},
+											},
+										},
+									},
+								},
+							},
+						},
+						"addresses": {
+							Nesting: configschema.NestingSingle,
+							Block: configschema.Block{
+								Attributes: map[string]*configschema.Attribute{
+									"ipv4": {Type: cty.String, Computed: true},
+									"ipv6": {Type: cty.String, Computed: true},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
 		return p, nil
 	}),
+	"terraform": providers.Factory(func() (providers.Interface, error) {
+		p := &terraform.MockProvider{}
+		p.GetSchemaReturn = &terraform.ProviderSchema{
+			DataSources: map[string]*configschema.Block{
+				"terraform_remote_state": {
+					// This is just enough an approximation of the remote state
+					// schema to check out reference upgrade logic. It is
+					// intentionally not fully-comprehensive.
+					Attributes: map[string]*configschema.Attribute{
+						"backend": {Type: cty.String, Optional: true},
+					},
+				},
+			},
+		}
+		return p, nil
+	}),
+	"aws": providers.Factory(func() (providers.Interface, error) {
+		// This is here only so we can test the provisioner connection info
+		// migration behavior, which is resource-type specific. Do not use
+		// it in any other tests.
+		p := &terraform.MockProvider{}
+		p.GetSchemaReturn = &terraform.ProviderSchema{
+			ResourceTypes: map[string]*configschema.Block{
+				"aws_instance": {},
+			},
+		}
+		return p, nil
+	}),
+}
+
+var testProvisioners = map[string]provisioners.Factory{
+	"test": provisioners.Factory(func() (provisioners.Interface, error) {
+		p := &terraform.MockProvisioner{}
+		p.GetSchemaResponse = provisioners.GetSchemaResponse{
+			Provisioner: &configschema.Block{
+				Attributes: map[string]*configschema.Attribute{
+					"commands":    {Type: cty.List(cty.String), Optional: true},
+					"interpreter": {Type: cty.String, Optional: true},
+				},
+			},
+		}
+		return p, nil
+	}),
+}
+
+func init() {
+	// Initialize the backends
+	backendinit.Init(nil)
+}
+
+func TestMain(m *testing.M) {
+	if testing.Verbose() {
+		// if we're verbose, use the logging requested by TF_LOG
+		logging.SetOutput()
+	} else {
+		// otherwise silence all logs
+		log.SetOutput(ioutil.Discard)
+	}
+
+	// We have fmt.Stringer implementations on lots of objects that hide
+	// details that we very often want to see in tests, so we just disable
+	// spew's use of String methods globally on the assumption that spew
+	// usage implies an intent to see the raw values and ignore any
+	// abstractions.
+	spew.Config.DisableMethods = true
+
+	os.Exit(m.Run())
 }

@@ -6,7 +6,7 @@ import (
 	"sort"
 
 	"github.com/hashicorp/terraform/configs/configschema"
-	"github.com/hashicorp/terraform/plugin/proto"
+	proto "github.com/hashicorp/terraform/internal/tfplugin5"
 	"github.com/hashicorp/terraform/providers"
 )
 
@@ -45,10 +45,25 @@ func ConfigSchemaToProto(b *configschema.Block) *proto.Schema_Block {
 }
 
 func protoSchemaNestedBlock(name string, b *configschema.NestedBlock) *proto.Schema_NestedBlock {
+	var nesting proto.Schema_NestedBlock_NestingMode
+	switch b.Nesting {
+	case configschema.NestingSingle:
+		nesting = proto.Schema_NestedBlock_SINGLE
+	case configschema.NestingGroup:
+		nesting = proto.Schema_NestedBlock_GROUP
+	case configschema.NestingList:
+		nesting = proto.Schema_NestedBlock_LIST
+	case configschema.NestingSet:
+		nesting = proto.Schema_NestedBlock_SET
+	case configschema.NestingMap:
+		nesting = proto.Schema_NestedBlock_MAP
+	default:
+		nesting = proto.Schema_NestedBlock_INVALID
+	}
 	return &proto.Schema_NestedBlock{
 		TypeName: name,
 		Block:    ConfigSchemaToProto(&b.Block),
-		Nesting:  proto.Schema_NestedBlock_NestingMode(b.Nesting),
+		Nesting:  nesting,
 		MinItems: int64(b.MinItems),
 		MaxItems: int64(b.MaxItems),
 	}
@@ -57,7 +72,7 @@ func protoSchemaNestedBlock(name string, b *configschema.NestedBlock) *proto.Sch
 // ProtoToProviderSchema takes a proto.Schema and converts it to a providers.Schema.
 func ProtoToProviderSchema(s *proto.Schema) providers.Schema {
 	return providers.Schema{
-		Version: uint64(s.Version),
+		Version: s.Version,
 		Block:   ProtoToConfigSchema(s.Block),
 	}
 }
@@ -94,8 +109,25 @@ func ProtoToConfigSchema(b *proto.Schema_Block) *configschema.Block {
 }
 
 func schemaNestedBlock(b *proto.Schema_NestedBlock) *configschema.NestedBlock {
+	var nesting configschema.NestingMode
+	switch b.Nesting {
+	case proto.Schema_NestedBlock_SINGLE:
+		nesting = configschema.NestingSingle
+	case proto.Schema_NestedBlock_GROUP:
+		nesting = configschema.NestingGroup
+	case proto.Schema_NestedBlock_LIST:
+		nesting = configschema.NestingList
+	case proto.Schema_NestedBlock_MAP:
+		nesting = configschema.NestingMap
+	case proto.Schema_NestedBlock_SET:
+		nesting = configschema.NestingSet
+	default:
+		// In all other cases we'll leave it as the zero value (invalid) and
+		// let the caller validate it and deal with this.
+	}
+
 	nb := &configschema.NestedBlock{
-		Nesting:  configschema.NestingMode(b.Nesting),
+		Nesting:  nesting,
 		MinItems: int(b.MinItems),
 		MaxItems: int(b.MaxItems),
 	}

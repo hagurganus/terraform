@@ -3,6 +3,7 @@ package command
 import (
 	"fmt"
 	"io/ioutil"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +14,6 @@ import (
 
 	"github.com/hashicorp/terraform/configs/configschema"
 	"github.com/hashicorp/terraform/helper/copy"
-	"github.com/hashicorp/terraform/plugin"
 	"github.com/hashicorp/terraform/plugin/discovery"
 	"github.com/hashicorp/terraform/providers"
 	"github.com/hashicorp/terraform/terraform"
@@ -161,7 +161,7 @@ func TestImport_remoteState(t *testing.T) {
 	statePath := "imported.tfstate"
 
 	// init our backend
-	ui := new(cli.MockUi)
+	ui := cli.NewMockUi()
 	m := Meta{
 		testingOverrides: metaOverridesForProvider(testProvider()),
 		Ui:               ui,
@@ -178,8 +178,10 @@ func TestImport_remoteState(t *testing.T) {
 		},
 	}
 
+	// (Using log here rather than t.Log so that these messages interleave with other trace logs)
+	log.Print("[TRACE] TestImport_remoteState running: terraform init")
 	if code := ic.Run([]string{}); code != 0 {
-		t.Fatalf("bad: \n%s", ui.ErrorWriter)
+		t.Fatalf("init failed\n%s", ui.ErrorWriter)
 	}
 
 	p := testProvider()
@@ -233,7 +235,7 @@ func TestImport_remoteState(t *testing.T) {
 		"test_instance.foo",
 		"bar",
 	}
-
+	log.Printf("[TRACE] TestImport_remoteState running: terraform import %s %s", args[0], args[1])
 	if code := c.Run(args); code != 0 {
 		fmt.Println(ui.OutputWriter)
 		t.Fatalf("bad: %d\n\n%s", code, ui.ErrorWriter.String())
@@ -798,14 +800,14 @@ func TestImport_pluginDir(t *testing.T) {
 	initCmd := &InitCommand{
 		Meta: Meta{
 			pluginPath: []string{"./plugins"},
-			Ui:         new(cli.MockUi),
+			Ui:         cli.NewMockUi(),
 		},
 		providerInstaller: &discovery.ProviderInstaller{
-			PluginProtocolVersion: plugin.Handshake.ProtocolVersion,
+			PluginProtocolVersion: discovery.PluginInstallProtocolVersion,
 		},
 	}
-	if err := initCmd.getProviders(".", nil, false); err != nil {
-		t.Fatal(err)
+	if code := initCmd.Run(nil); code != 0 {
+		t.Fatal(initCmd.Meta.Ui.(*cli.MockUi).ErrorWriter.String())
 	}
 
 	args := []string{

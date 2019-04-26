@@ -719,6 +719,74 @@ func TestContext2Validate_provisionerConfig_bad(t *testing.T) {
 	}
 }
 
+func TestContext2Validate_badResourceConnection(t *testing.T) {
+	m := testModule(t, "validate-bad-resource-connection")
+	p := testProvider("aws")
+	p.GetSchemaReturn = &ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"aws_instance": {
+				Attributes: map[string]*configschema.Attribute{
+					"foo": {Type: cty.String, Optional: true},
+				},
+			},
+		},
+	}
+
+	pr := simpleMockProvisioner()
+
+	c := testContext2(t, &ContextOpts{
+		Config: m,
+		ProviderResolver: providers.ResolverFixed(
+			map[string]providers.Factory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
+		Provisioners: map[string]ProvisionerFactory{
+			"shell": testProvisionerFuncFixed(pr),
+		},
+	})
+
+	diags := c.Validate()
+	t.Log(diags.Err())
+	if !diags.HasErrors() {
+		t.Fatalf("succeeded; want error")
+	}
+}
+
+func TestContext2Validate_badProvisionerConnection(t *testing.T) {
+	m := testModule(t, "validate-bad-prov-connection")
+	p := testProvider("aws")
+	p.GetSchemaReturn = &ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"aws_instance": {
+				Attributes: map[string]*configschema.Attribute{
+					"foo": {Type: cty.String, Optional: true},
+				},
+			},
+		},
+	}
+
+	pr := simpleMockProvisioner()
+
+	c := testContext2(t, &ContextOpts{
+		Config: m,
+		ProviderResolver: providers.ResolverFixed(
+			map[string]providers.Factory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
+		Provisioners: map[string]ProvisionerFactory{
+			"shell": testProvisionerFuncFixed(pr),
+		},
+	})
+
+	diags := c.Validate()
+	t.Log(diags.Err())
+	if !diags.HasErrors() {
+		t.Fatalf("succeeded; want error")
+	}
+}
+
 func TestContext2Validate_provisionerConfig_good(t *testing.T) {
 	m := testModule(t, "validate-bad-prov-conf")
 	p := testProvider("aws")
@@ -962,7 +1030,7 @@ func TestContext2Validate_targetedDestroy(t *testing.T) {
 	}
 }
 
-func TestContext2Validate_varRefFilled(t *testing.T) {
+func TestContext2Validate_varRefUnknown(t *testing.T) {
 	m := testModule(t, "validate-variable-ref")
 	p := testProvider("aws")
 	p.GetSchemaReturn = &ProviderSchema{
@@ -996,7 +1064,11 @@ func TestContext2Validate_varRefFilled(t *testing.T) {
 	}
 
 	c.Validate()
-	if !value.RawEquals(cty.StringVal("bar")) {
+
+	// Input variables are always unknown during the validate walk, because
+	// we're checking for validity of all possible input values. Validity
+	// against specific input values is checked during the plan walk.
+	if !value.RawEquals(cty.UnknownVal(cty.String)) {
 		t.Fatalf("bad: %#v", value)
 	}
 }
@@ -1149,12 +1221,6 @@ func TestContext2Validate_PlanGraphBuilder(t *testing.T) {
 	}
 }
 
-// FIXME: these 2 tests should be caught in validation.
-// Since the evaluator can't determine if the resource contains a count during
-// validation, any refereces are currently returned as unknown. We need a
-// static validation of a reference to determine if it's possible within a
-// particular schema.
-/*
 func TestContext2Validate_invalidOutput(t *testing.T) {
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -1177,9 +1243,12 @@ output "out" {
 
 	diags := ctx.Validate()
 	if !diags.HasErrors() {
-		// Should get this error:
-		// Unsupported attribute: This object does not have an attribute named "missing"
 		t.Fatal("succeeded; want errors")
+	}
+	// Should get this error:
+	// Unsupported attribute: This object does not have an attribute named "missing"
+	if got, want := diags.Err().Error(), "Unsupported attribute"; strings.Index(got, want) == -1 {
+		t.Fatalf("wrong error:\ngot:  %s\nwant: message containing %q", got, want)
 	}
 }
 
@@ -1213,9 +1282,175 @@ resource "aws_instance" "foo" {
 
 	diags := ctx.Validate()
 	if !diags.HasErrors() {
-		// Should get this error:
-		// Unsupported attribute: This object does not have an attribute named "missing"
 		t.Fatal("succeeded; want errors")
 	}
+	// Should get this error:
+	// Unsupported attribute: This object does not have an attribute named "missing"
+	if got, want := diags.Err().Error(), "Unsupported attribute"; strings.Index(got, want) == -1 {
+		t.Fatalf("wrong error:\ngot:  %s\nwant: message containing %q", got, want)
+	}
 }
-*/
+
+func TestContext2Validate_legacyResourceCount(t *testing.T) {
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "aws_instance" "test" {}
+
+output "out" {
+  value = aws_instance.test.count
+}`,
+	})
+
+	p := testProvider("aws")
+	ctx := testContext2(t, &ContextOpts{
+		Config: m,
+		ProviderResolver: providers.ResolverFixed(
+			map[string]providers.Factory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
+	})
+
+	diags := ctx.Validate()
+	if !diags.HasErrors() {
+		t.Fatal("succeeded; want errors")
+	}
+	// Should get this error:
+	// Invalid resource count attribute: The special "count" attribute is no longer supported after Terraform v0.12. Instead, use length(aws_instance.test) to count resource instances.
+	if got, want := diags.Err().Error(), "Invalid resource count attribute:"; strings.Index(got, want) == -1 {
+		t.Fatalf("wrong error:\ngot:  %s\nwant: message containing %q", got, want)
+	}
+}
+
+func TestContext2Validate_invalidModuleRef(t *testing.T) {
+	// This test is verifying that we properly validate and report on references
+	// to modules that are not declared, since we were missing some validation
+	// here in early 0.12.0 alphas that led to a panic.
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+output "out" {
+  # Intentionally referencing undeclared module to ensure error
+  value = module.foo
+}`,
+	})
+
+	p := testProvider("aws")
+	ctx := testContext2(t, &ContextOpts{
+		Config: m,
+		ProviderResolver: providers.ResolverFixed(
+			map[string]providers.Factory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
+	})
+
+	diags := ctx.Validate()
+	if !diags.HasErrors() {
+		t.Fatal("succeeded; want errors")
+	}
+	// Should get this error:
+	// Reference to undeclared module: No module call named "foo" is declared in the root module.
+	if got, want := diags.Err().Error(), "Reference to undeclared module:"; strings.Index(got, want) == -1 {
+		t.Fatalf("wrong error:\ngot:  %s\nwant: message containing %q", got, want)
+	}
+}
+
+func TestContext2Validate_invalidModuleOutputRef(t *testing.T) {
+	// This test is verifying that we properly validate and report on references
+	// to modules that are not declared, since we were missing some validation
+	// here in early 0.12.0 alphas that led to a panic.
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+output "out" {
+  # Intentionally referencing undeclared module to ensure error
+  value = module.foo.bar
+}`,
+	})
+
+	p := testProvider("aws")
+	ctx := testContext2(t, &ContextOpts{
+		Config: m,
+		ProviderResolver: providers.ResolverFixed(
+			map[string]providers.Factory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
+	})
+
+	diags := ctx.Validate()
+	if !diags.HasErrors() {
+		t.Fatal("succeeded; want errors")
+	}
+	// Should get this error:
+	// Reference to undeclared module: No module call named "foo" is declared in the root module.
+	if got, want := diags.Err().Error(), "Reference to undeclared module:"; strings.Index(got, want) == -1 {
+		t.Fatalf("wrong error:\ngot:  %s\nwant: message containing %q", got, want)
+	}
+}
+
+func TestContext2Validate_invalidDependsOnResourceRef(t *testing.T) {
+	// This test is verifying that we raise an error if depends_on
+	// refers to something that doesn't exist in configuration.
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "test_instance" "bar" {
+  depends_on = [test_resource.nonexistant]
+}
+`,
+	})
+
+	p := testProvider("test")
+	ctx := testContext2(t, &ContextOpts{
+		Config: m,
+		ProviderResolver: providers.ResolverFixed(
+			map[string]providers.Factory{
+				"test": testProviderFuncFixed(p),
+			},
+		),
+	})
+
+	diags := ctx.Validate()
+	if !diags.HasErrors() {
+		t.Fatal("succeeded; want errors")
+	}
+	// Should get this error:
+	// Reference to undeclared module: No module call named "foo" is declared in the root module.
+	if got, want := diags.Err().Error(), "Reference to undeclared resource:"; strings.Index(got, want) == -1 {
+		t.Fatalf("wrong error:\ngot:  %s\nwant: message containing %q", got, want)
+	}
+}
+
+func TestContext2Validate_invalidResourceIgnoreChanges(t *testing.T) {
+	// This test is verifying that we raise an error if ignore_changes
+	// refers to something that can be statically detected as not conforming
+	// to the resource type schema.
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "test_instance" "bar" {
+  lifecycle {
+    ignore_changes = [does_not_exist_in_schema]
+  }
+}
+`,
+	})
+
+	p := testProvider("test")
+	ctx := testContext2(t, &ContextOpts{
+		Config: m,
+		ProviderResolver: providers.ResolverFixed(
+			map[string]providers.Factory{
+				"test": testProviderFuncFixed(p),
+			},
+		),
+	})
+
+	diags := ctx.Validate()
+	if !diags.HasErrors() {
+		t.Fatal("succeeded; want errors")
+	}
+	// Should get this error:
+	// Reference to undeclared module: No module call named "foo" is declared in the root module.
+	if got, want := diags.Err().Error(), `no argument, nested block, or exported attribute named "does_not_exist_in_schema"`; strings.Index(got, want) == -1 {
+		t.Fatalf("wrong error:\ngot:  %s\nwant: message containing %q", got, want)
+	}
+}

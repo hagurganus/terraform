@@ -48,16 +48,6 @@ If set to "false" or "0", causes terraform commands to behave as if the `-input=
 export TF_INPUT=0
 ```
 
-## TF_MODULE_DEPTH
-
-When given a value, causes terraform commands to behave as if the `-module-depth=VALUE` flag was specified. By setting this to 0, for example, you enable commands such as [plan](/docs/commands/plan.html) and [graph](/docs/commands/graph.html) to display more compressed information.
-
-```shell
-export TF_MODULE_DEPTH=0
-```
-
-For more information regarding modules, check out the section on [Using Modules](/docs/modules/usage.html).
-
 ## TF_VAR_name
 
 Environment variables can be used to set variables. The environment variables must be in the format `TF_VAR_name` and this will be checked last for a value. For example:
@@ -110,3 +100,24 @@ The data directory is used to retain data that must persist from one command
 to the next, so it's important to have this variable set consistently throughout
 all of the Terraform workflow commands (starting with `terraform init`) or else
 Terraform may be unable to find providers, modules, and other artifacts.
+
+## TF_IN_AUTOMATION
+
+If `TF_IN_AUTOMATION` is set to any non-empty value, Terraform adjusts its
+output to avoid suggesting specific commands to run next. This can make the
+output more consistent and less confusing in workflows where users don't
+directly execute Terraform commands, like in CI systems or other wrapping
+applications.
+
+This is a purely cosmetic change to Terraform's human-readable output, and the
+exact output differences can change between minor Terraform versions.
+
+For more details see [Running Terraform in Automation](https://learn.hashicorp.com/terraform/development/running-terraform-in-automation).
+
+## TF_CLI_CONFIG_FILE
+
+The location of the [Terraform CLI configuration file](/docs/commands/cli-config.html).
+
+```shell
+export TF_CLI_CONFIG_FILE="$HOME/.terraformrc-custom"
+```

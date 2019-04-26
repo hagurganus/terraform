@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/hashicorp/go-multierror"
+	"github.com/hashicorp/terraform/helper/schema"
+	"github.com/hashicorp/terraform/plugin/discovery"
 	"github.com/hashicorp/terraform/terraform"
 )
 
@@ -55,7 +57,7 @@ func TestParallelTest(t *testing.T) {
 }
 
 func TestTest(t *testing.T) {
-	t.Fatal("test requires new provider implementation")
+	t.Skip("test requires new provider implementation")
 
 	mp := &resetProvider{
 		MockResourceProvider: testProvider(),
@@ -138,7 +140,7 @@ func TestTest(t *testing.T) {
 }
 
 func TestTest_plan_only(t *testing.T) {
-	t.Fatal("test requires new provider implementation")
+	t.Skip("test requires new provider implementation")
 
 	mp := testProvider()
 	mp.ApplyReturn = &terraform.InstanceState{
@@ -192,7 +194,7 @@ STATE:
 }
 
 func TestTest_idRefresh(t *testing.T) {
-	t.Fatal("test requires new provider implementation")
+	t.Skip("test requires new provider implementation")
 
 	// Refresh count should be 3:
 	//   1.) initial Ref/Plan/Apply
@@ -246,7 +248,7 @@ func TestTest_idRefresh(t *testing.T) {
 }
 
 func TestTest_idRefreshCustomName(t *testing.T) {
-	t.Fatal("test requires new provider implementation")
+	t.Skip("test requires new provider implementation")
 
 	// Refresh count should be 3:
 	//   1.) initial Ref/Plan/Apply
@@ -300,7 +302,7 @@ func TestTest_idRefreshCustomName(t *testing.T) {
 }
 
 func TestTest_idRefreshFail(t *testing.T) {
-	t.Fatal("test requires new provider implementation")
+	t.Skip("test requires new provider implementation")
 
 	// Refresh count should be 3:
 	//   1.) initial Ref/Plan/Apply
@@ -364,7 +366,7 @@ func TestTest_idRefreshFail(t *testing.T) {
 }
 
 func TestTest_empty(t *testing.T) {
-	t.Fatal("test requires new provider implementation")
+	t.Skip("test requires new provider implementation")
 
 	destroyCalled := false
 	checkDestroyFn := func(*terraform.State) error {
@@ -386,7 +388,7 @@ func TestTest_empty(t *testing.T) {
 }
 
 func TestTest_noEnv(t *testing.T) {
-	t.Fatal("test requires new provider implementation")
+	t.Skip("test requires new provider implementation")
 
 	// Unset the variable
 	if err := os.Setenv(TestEnvVar, ""); err != nil {
@@ -403,7 +405,7 @@ func TestTest_noEnv(t *testing.T) {
 }
 
 func TestTest_preCheck(t *testing.T) {
-	t.Fatal("test requires new provider implementation")
+	t.Skip("test requires new provider implementation")
 
 	called := false
 
@@ -418,7 +420,7 @@ func TestTest_preCheck(t *testing.T) {
 }
 
 func TestTest_skipFunc(t *testing.T) {
-	t.Fatal("test requires new provider implementation")
+	t.Skip("test requires new provider implementation")
 
 	preCheckCalled := false
 	skipped := false
@@ -460,7 +462,7 @@ func TestTest_skipFunc(t *testing.T) {
 }
 
 func TestTest_stepError(t *testing.T) {
-	t.Fatal("test requires new provider implementation")
+	t.Skip("test requires new provider implementation")
 
 	mp := testProvider()
 	mp.ApplyReturn = &terraform.InstanceState{
@@ -530,7 +532,7 @@ func TestTest_factoryError(t *testing.T) {
 }
 
 func TestTest_resetError(t *testing.T) {
-	t.Fatal("test requires new provider implementation")
+	t.Skip("test requires new provider implementation")
 
 	mp := &resetProvider{
 		MockResourceProvider: testProvider(),
@@ -555,7 +557,7 @@ func TestTest_resetError(t *testing.T) {
 }
 
 func TestTest_expectError(t *testing.T) {
-	t.Fatal("test requires new provider implementation")
+	t.Skip("test requires new provider implementation")
 
 	cases := []struct {
 		name     string
@@ -953,7 +955,7 @@ func mockSweeperFunc(s string) error {
 }
 
 func TestTest_Taint(t *testing.T) {
-	t.Fatal("test requires new provider implementation")
+	t.Skip("test requires new provider implementation")
 
 	mp := testProvider()
 	mp.DiffFn = func(
@@ -1033,6 +1035,77 @@ func TestTest_Taint(t *testing.T) {
 	}
 }
 
+func TestTestProviderResolver(t *testing.T) {
+	stubProvider := func(name string) terraform.ResourceProvider {
+		return &schema.Provider{
+			Schema: map[string]*schema.Schema{
+				name: &schema.Schema{
+					Type:     schema.TypeString,
+					Required: true,
+				},
+			},
+		}
+	}
+
+	c := TestCase{
+		ProviderFactories: map[string]terraform.ResourceProviderFactory{
+			"foo": terraform.ResourceProviderFactoryFixed(stubProvider("foo")),
+			"bar": terraform.ResourceProviderFactoryFixed(stubProvider("bar")),
+		},
+		Providers: map[string]terraform.ResourceProvider{
+			"baz": stubProvider("baz"),
+			"bop": stubProvider("bop"),
+		},
+	}
+
+	resolver, err := testProviderResolver(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqd := discovery.PluginRequirements{
+		"foo": &discovery.PluginConstraints{},
+		"bar": &discovery.PluginConstraints{},
+		"baz": &discovery.PluginConstraints{},
+		"bop": &discovery.PluginConstraints{},
+	}
+
+	factories, errs := resolver.ResolveProviders(reqd)
+	if len(errs) != 0 {
+		for _, err := range errs {
+			t.Error(err)
+		}
+		t.Fatal("unexpected errors")
+	}
+
+	for name := range reqd {
+		t.Run(name, func(t *testing.T) {
+			pf, ok := factories[name]
+			if !ok {
+				t.Fatalf("no factory for %q", name)
+			}
+			p, err := pf()
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp := p.GetSchema()
+			_, ok = resp.Provider.Block.Attributes[name]
+			if !ok {
+				var has string
+				for k := range resp.Provider.Block.Attributes {
+					has = k
+					break
+				}
+				if has != "" {
+					t.Errorf("provider %q does not have the expected schema attribute %q (but has %q)", name, name, has)
+				} else {
+					t.Errorf("provider %q does not have the expected schema attribute %q", name, name)
+				}
+			}
+		})
+	}
+}
+
 const testConfigStr = `
 resource "test_instance" "foo" {}
 `
@@ -1040,3 +1113,322 @@ resource "test_instance" "foo" {}
 const testConfigStrProvider = `
 provider "test" {}
 `
+
+func TestCheckResourceAttr_empty(t *testing.T) {
+	s := terraform.NewState()
+	s.AddModuleState(&terraform.ModuleState{
+		Path: []string{"root"},
+		Resources: map[string]*terraform.ResourceState{
+			"test_resource": &terraform.ResourceState{
+				Primary: &terraform.InstanceState{
+					Attributes: map[string]string{
+						"empty_list.#": "0",
+						"empty_map.%":  "0",
+					},
+				},
+			},
+		},
+	})
+
+	for _, key := range []string{
+		"empty_list.#",
+		"empty_map.%",
+		"missing_list.#",
+		"missing_map.%",
+	} {
+		t.Run(key, func(t *testing.T) {
+			check := TestCheckResourceAttr("test_resource", key, "0")
+			if err := check(s); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestCheckNoResourceAttr_empty(t *testing.T) {
+	s := terraform.NewState()
+	s.AddModuleState(&terraform.ModuleState{
+		Path: []string{"root"},
+		Resources: map[string]*terraform.ResourceState{
+			"test_resource": &terraform.ResourceState{
+				Primary: &terraform.InstanceState{
+					Attributes: map[string]string{
+						"empty_list.#": "0",
+						"empty_map.%":  "0",
+					},
+				},
+			},
+		},
+	})
+
+	for _, key := range []string{
+		"empty_list.#",
+		"empty_map.%",
+		"missing_list.#",
+		"missing_map.%",
+	} {
+		t.Run(key, func(t *testing.T) {
+			check := TestCheckNoResourceAttr("test_resource", key)
+			if err := check(s); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestTestCheckResourceAttrPair(t *testing.T) {
+	tests := map[string]struct {
+		state   *terraform.State
+		wantErr string
+	}{
+		"exist match": {
+			&terraform.State{
+				Modules: []*terraform.ModuleState{
+					{
+						Path: []string{"root"},
+						Resources: map[string]*terraform.ResourceState{
+							"test.a": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{
+										"a": "boop",
+									},
+								},
+							},
+							"test.b": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{
+										"b": "boop",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			``,
+		},
+		"nonexist match": {
+			&terraform.State{
+				Modules: []*terraform.ModuleState{
+					{
+						Path: []string{"root"},
+						Resources: map[string]*terraform.ResourceState{
+							"test.a": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{},
+								},
+							},
+							"test.b": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{},
+								},
+							},
+						},
+					},
+				},
+			},
+			``,
+		},
+		"exist nonmatch": {
+			&terraform.State{
+				Modules: []*terraform.ModuleState{
+					{
+						Path: []string{"root"},
+						Resources: map[string]*terraform.ResourceState{
+							"test.a": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{
+										"a": "beep",
+									},
+								},
+							},
+							"test.b": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{
+										"b": "boop",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			`test.a: Attribute 'a' expected "boop", got "beep"`,
+		},
+		"inconsistent exist a": {
+			&terraform.State{
+				Modules: []*terraform.ModuleState{
+					{
+						Path: []string{"root"},
+						Resources: map[string]*terraform.ResourceState{
+							"test.a": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{
+										"a": "beep",
+									},
+								},
+							},
+							"test.b": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{},
+								},
+							},
+						},
+					},
+				},
+			},
+			`test.a: Attribute "a" is "beep", but "b" is not set in test.b`,
+		},
+		"inconsistent exist b": {
+			&terraform.State{
+				Modules: []*terraform.ModuleState{
+					{
+						Path: []string{"root"},
+						Resources: map[string]*terraform.ResourceState{
+							"test.a": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{},
+								},
+							},
+							"test.b": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{
+										"b": "boop",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			`test.a: Attribute "a" not set, but "b" is set in test.b as "boop"`,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			fn := TestCheckResourceAttrPair("test.a", "a", "test.b", "b")
+			err := fn(test.state)
+
+			if test.wantErr != "" {
+				if err == nil {
+					t.Fatalf("succeeded; want error\nwant: %s", test.wantErr)
+				}
+				if got, want := err.Error(), test.wantErr; got != want {
+					t.Fatalf("wrong error\ngot:  %s\nwant: %s", got, want)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("failed; want success\ngot: %s", err.Error())
+			}
+		})
+	}
+}
+
+func TestTestCheckResourceAttrPairCount(t *testing.T) {
+	tests := map[string]struct {
+		state   *terraform.State
+		attr    string
+		wantErr string
+	}{
+		"unset and 0 equal list": {
+			&terraform.State{
+				Modules: []*terraform.ModuleState{
+					{
+						Path: []string{"root"},
+						Resources: map[string]*terraform.ResourceState{
+							"test.a": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{
+										"a.#": "0",
+									},
+								},
+							},
+							"test.b": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{},
+								},
+							},
+						},
+					},
+				},
+			},
+			"a.#",
+			``,
+		},
+		"unset and 0 equal map": {
+			&terraform.State{
+				Modules: []*terraform.ModuleState{
+					{
+						Path: []string{"root"},
+						Resources: map[string]*terraform.ResourceState{
+							"test.a": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{
+										"a.%": "0",
+									},
+								},
+							},
+							"test.b": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{},
+								},
+							},
+						},
+					},
+				},
+			},
+			"a.%",
+			``,
+		},
+		"count equal": {
+			&terraform.State{
+				Modules: []*terraform.ModuleState{
+					{
+						Path: []string{"root"},
+						Resources: map[string]*terraform.ResourceState{
+							"test.a": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{
+										"a.%": "1",
+									},
+								},
+							},
+							"test.b": {
+								Primary: &terraform.InstanceState{
+									Attributes: map[string]string{
+										"a.%": "1",
+									}},
+							},
+						},
+					},
+				},
+			},
+			"a.%",
+			``,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			fn := TestCheckResourceAttrPair("test.a", test.attr, "test.b", test.attr)
+			err := fn(test.state)
+
+			if test.wantErr != "" {
+				if err == nil {
+					t.Fatalf("succeeded; want error\nwant: %s", test.wantErr)
+				}
+				if got, want := err.Error(), test.wantErr; got != want {
+					t.Fatalf("wrong error\ngot:  %s\nwant: %s", got, want)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("failed; want success\ngot: %s", err.Error())
+			}
+		})
+	}
+}

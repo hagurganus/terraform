@@ -13,8 +13,8 @@ import (
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/hashicorp/terraform/backend"
-	"github.com/hashicorp/terraform/configs/configload"
 	"github.com/hashicorp/terraform/configs/configschema"
+	"github.com/hashicorp/terraform/internal/initwd"
 	"github.com/hashicorp/terraform/providers"
 	"github.com/hashicorp/terraform/states"
 	"github.com/hashicorp/terraform/states/statemgr"
@@ -25,8 +25,8 @@ import (
 func TestLocal_applyBasic(t *testing.T) {
 	b, cleanup := TestLocal(t)
 	defer cleanup()
-	p := TestLocalProvider(t, b, "test", applyFixtureSchema())
 
+	p := TestLocalProvider(t, b, "test", applyFixtureSchema())
 	p.ApplyResourceChangeResponse = providers.ApplyResourceChangeResponse{NewState: cty.ObjectVal(map[string]cty.Value{
 		"id":  cty.StringVal("yes"),
 		"ami": cty.StringVal("bar"),
@@ -95,8 +95,8 @@ func TestLocal_applyEmptyDir(t *testing.T) {
 func TestLocal_applyEmptyDirDestroy(t *testing.T) {
 	b, cleanup := TestLocal(t)
 	defer cleanup()
-	p := TestLocalProvider(t, b, "test", &terraform.ProviderSchema{})
 
+	p := TestLocalProvider(t, b, "test", &terraform.ProviderSchema{})
 	p.ApplyResourceChangeResponse = providers.ApplyResourceChangeResponse{}
 
 	op, configCleanup := testOperationApply(t, "./test-fixtures/empty")
@@ -122,8 +122,8 @@ func TestLocal_applyEmptyDirDestroy(t *testing.T) {
 func TestLocal_applyError(t *testing.T) {
 	b, cleanup := TestLocal(t)
 	defer cleanup()
-	p := TestLocalProvider(t, b, "test", nil)
-	p.GetSchemaReturn = &terraform.ProviderSchema{
+
+	schema := &terraform.ProviderSchema{
 		ResourceTypes: map[string]*configschema.Block{
 			"test_instance": {
 				Attributes: map[string]*configschema.Attribute{
@@ -133,6 +133,7 @@ func TestLocal_applyError(t *testing.T) {
 			},
 		},
 	}
+	p := TestLocalProvider(t, b, "test", schema)
 
 	var lock sync.Mutex
 	errored := false
@@ -251,7 +252,7 @@ func (s failingState) WriteState(state *states.State) error {
 func testOperationApply(t *testing.T, configDir string) (*backend.Operation, func()) {
 	t.Helper()
 
-	_, configLoader, configCleanup := configload.MustLoadConfigForTests(t, configDir)
+	_, configLoader, configCleanup := initwd.MustLoadConfigForTests(t, configDir)
 
 	return &backend.Operation{
 		Type:         backend.OperationTypeApply,

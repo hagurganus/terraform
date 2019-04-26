@@ -102,6 +102,32 @@ func TestAssertObjectCompatible(t *testing.T) {
 						Type:     cty.String,
 						Computed: true,
 					},
+					"name": {
+						Type:      cty.String,
+						Required:  true,
+						Sensitive: true,
+					},
+				},
+			},
+			cty.ObjectVal(map[string]cty.Value{
+				"id":   cty.UnknownVal(cty.String),
+				"name": cty.StringVal("wotsit"),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"id":   cty.UnknownVal(cty.String),
+				"name": cty.StringVal("thingy"),
+			}),
+			[]string{
+				`.name: inconsistent values for sensitive attribute`,
+			},
+		},
+		{
+			&configschema.Block{
+				Attributes: map[string]*configschema.Attribute{
+					"id": {
+						Type:     cty.String,
+						Computed: true,
+					},
 					"stuff": {
 						Type:     cty.DynamicPseudoType,
 						Required: true,
@@ -439,6 +465,7 @@ func TestAssertObjectCompatible(t *testing.T) {
 				}),
 			}),
 			[]string{
+				`.zones: actual set element cty.StringVal("wotsit") does not correlate with any element in plan`,
 				`.zones: length changed from 1 to 2`,
 			},
 		},
@@ -846,6 +873,242 @@ func TestAssertObjectCompatible(t *testing.T) {
 			[]string{
 				`.key: block count changed from 0 to 2`,
 			},
+		},
+
+		// NestingSet blocks
+		{
+			&configschema.Block{
+				BlockTypes: map[string]*configschema.NestedBlock{
+					"block": {
+						Nesting: configschema.NestingSet,
+						Block: configschema.Block{
+							Attributes: map[string]*configschema.Attribute{
+								"foo": {
+									Type:     cty.String,
+									Optional: true,
+								},
+							},
+						},
+					},
+				},
+			},
+			cty.ObjectVal(map[string]cty.Value{
+				"block": cty.SetVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.StringVal("hello"),
+					}),
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.StringVal("world"),
+					}),
+				}),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"block": cty.SetVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.StringVal("hello"),
+					}),
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.StringVal("world"),
+					}),
+				}),
+			}),
+			nil,
+		},
+		{
+			&configschema.Block{
+				BlockTypes: map[string]*configschema.NestedBlock{
+					"block": {
+						Nesting: configschema.NestingSet,
+						Block: configschema.Block{
+							Attributes: map[string]*configschema.Attribute{
+								"foo": {
+									Type:     cty.String,
+									Optional: true,
+								},
+							},
+						},
+					},
+				},
+			},
+			cty.ObjectVal(map[string]cty.Value{
+				"block": cty.SetVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.UnknownVal(cty.String),
+					}),
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.UnknownVal(cty.String),
+					}),
+				}),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"block": cty.SetVal([]cty.Value{
+					// This is testing the scenario where the two unknown values
+					// turned out to be equal after we learned their values,
+					// and so they coalesced together into a single element.
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.StringVal("hello"),
+					}),
+				}),
+			}),
+			nil,
+		},
+		{
+			&configschema.Block{
+				BlockTypes: map[string]*configschema.NestedBlock{
+					"block": {
+						Nesting: configschema.NestingSet,
+						Block: configschema.Block{
+							Attributes: map[string]*configschema.Attribute{
+								"foo": {
+									Type:     cty.String,
+									Optional: true,
+								},
+							},
+						},
+					},
+				},
+			},
+			cty.ObjectVal(map[string]cty.Value{
+				"block": cty.SetVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.UnknownVal(cty.String),
+					}),
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.UnknownVal(cty.String),
+					}),
+				}),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"block": cty.SetVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.StringVal("hello"),
+					}),
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.StringVal("world"),
+					}),
+				}),
+			}),
+			nil,
+		},
+		{
+			&configschema.Block{
+				BlockTypes: map[string]*configschema.NestedBlock{
+					"block": {
+						Nesting: configschema.NestingSet,
+						Block: configschema.Block{
+							Attributes: map[string]*configschema.Attribute{
+								"foo": {
+									Type:     cty.String,
+									Optional: true,
+								},
+							},
+						},
+					},
+				},
+			},
+			cty.ObjectVal(map[string]cty.Value{
+				"block": cty.SetVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.UnknownVal(cty.String),
+					}),
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.UnknownVal(cty.String),
+					}),
+				}),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"block": cty.SetVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.StringVal("hello"),
+					}),
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.StringVal("world"),
+					}),
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.StringVal("nope"),
+					}),
+				}),
+			}),
+			[]string{
+				`.block: block set length changed from 2 to 3`,
+			},
+		},
+		{
+			&configschema.Block{
+				BlockTypes: map[string]*configschema.NestedBlock{
+					"block": {
+						Nesting: configschema.NestingSet,
+						Block: configschema.Block{
+							Attributes: map[string]*configschema.Attribute{
+								"foo": {
+									Type:     cty.String,
+									Optional: true,
+								},
+							},
+						},
+					},
+				},
+			},
+			cty.ObjectVal(map[string]cty.Value{
+				"block": cty.SetVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.StringVal("hello"),
+					}),
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.StringVal("world"),
+					}),
+				}),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"block": cty.SetVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.StringVal("howdy"),
+					}),
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.StringVal("world"),
+					}),
+				}),
+			}),
+			[]string{
+				`.block: planned set element cty.ObjectVal(map[string]cty.Value{"foo":cty.StringVal("hello")}) does not correlate with any element in actual`,
+			},
+		},
+		{
+			// This one is an odd situation where the value representing the
+			// block itself is unknown. This is never supposed to be true,
+			// but in legacy SDK mode we allow such things to pass through as
+			// a warning, and so we must tolerate them for matching purposes.
+			&configschema.Block{
+				BlockTypes: map[string]*configschema.NestedBlock{
+					"block": {
+						Nesting: configschema.NestingSet,
+						Block: configschema.Block{
+							Attributes: map[string]*configschema.Attribute{
+								"foo": {
+									Type:     cty.String,
+									Optional: true,
+								},
+							},
+						},
+					},
+				},
+			},
+			cty.ObjectVal(map[string]cty.Value{
+				"block": cty.SetVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.UnknownVal(cty.String),
+					}),
+					cty.ObjectVal(map[string]cty.Value{
+						"foo": cty.UnknownVal(cty.String),
+					}),
+				}),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"block": cty.UnknownVal(cty.Set(cty.Object(map[string]cty.Type{
+					"foo": cty.String,
+				}))),
+			}),
+			nil,
 		},
 	}
 
